@@ -33,11 +33,16 @@ def generate_step_from_2d_cad_image(
         image_filepath (str): Path to the 2D CAD image
         output_filepath (str): Path to the output STEP file
     """
-    only_execute = (model_type == "llama")  # llamaだとagentがうまく動かない
+    only_execute = (model_type == "llama")  # 使用 llama 时 agent 表现不稳定
     image_data = ImageData.load_from_file(image_filepath)
     chain = CadCodeGeneratorChain(model_type=model_type)
 
     result = chain.invoke(image_data)["result"]
+    if not result:
+        raise ValueError(
+            "CAD code generation failed: model response did not contain parsable code. "
+            "Please retry or lower temperature."
+        )
     code = Template(result).substitute(output_filename=output_filepath)
     logger.info("1st code generation complete. Running code...")
     logger.debug("Generated 1st code:")

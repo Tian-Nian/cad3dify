@@ -11,12 +11,18 @@ from ..image import ImageData
 
 
 def _parse_code(input: dict) -> dict:
-    match = re.search(r"```(?:python)?\n(.*?)\n```", input["text"], re.DOTALL)
+    text = input.get("text", "")
+    match = re.search(r"```(?:python)?\n(.*?)\n```", text, re.DOTALL)
     if match:
         code_output = match.group(1).strip()
         return {"result": code_output}
-    else:
-        return {"result": None}
+    # Some OpenAI-compatible endpoints return raw code without markdown fences.
+    code_output = text.strip()
+    if code_output.startswith("```") and code_output.endswith("```"):
+        code_output = re.sub(r"^```(?:python)?\n?", "", code_output)
+        code_output = re.sub(r"\n?```$", "", code_output)
+        code_output = code_output.strip()
+    return {"result": code_output if code_output else None}
 
 
 _cad_query_examples = [
@@ -323,8 +329,8 @@ class CadCodeGeneratorChain(SequentialChain):
         ), "inputs must be ImageData or dict with 'input' and 'input' must be ImageData"
         if isinstance(inputs, ImageData):
             inputs = {"input": inputs}
-        if self.model_type == "claude" and inputs["input"].type != "png":
+        if self.model_type in ["claude", "custom"] and inputs["input"].type != "png":
             inputs["input"] = inputs["input"].convert("png")
-        inputs["image_type"] = inputs["input"].type
+        inputs["image_type"] = inputs["input"].media_type
         inputs["image_data"] = inputs["input"].data
         return inputs

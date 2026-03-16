@@ -1,8 +1,7 @@
+import os
 from typing import Literal
 
 try:
-    import os
-
     import vertexai
     vertexai.init(project=os.environ["VERTEXAI_PROJECT"], location=os.environ["VERTEXAI_LOCATION"])
 except KeyError:
@@ -15,8 +14,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-MODEL_TYPE = Literal["gpt", "claude", "gemini", "llama"]
-PROVIDER_TYPE = Literal["openai", "anthropic", "google", "vertex_ai"]
+MODEL_TYPE = Literal["gpt", "claude", "gemini", "llama", "custom"]
+PROVIDER_TYPE = Literal["openai", "anthropic", "google", "vertex_ai", "openai_compatible"]
 
 
 class ChatModelParameters(BaseModel):
@@ -24,6 +23,17 @@ class ChatModelParameters(BaseModel):
     model_name: str
     temperature: float
     max_tokens: int | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+    @staticmethod
+    def _normalize_openai_base_url(base_url: str) -> str:
+        normalized = base_url.rstrip("/")
+        if normalized.endswith("/chat/completions"):
+            normalized = normalized[: -len("/chat/completions")]
+        if not normalized.endswith("/v1"):
+            normalized = f"{normalized}/v1"
+        return normalized
 
     @classmethod
     def default(cls) -> "ChatModelParameters":
@@ -64,6 +74,14 @@ class ChatModelParameters(BaseModel):
                 model_name="meta/llama-3.2-90b-vision-instruct-maas",
                 temperature=temperature,
             ),
+            "custom": cls(
+                provider="openai_compatible",
+                model_name=os.getenv("CUSTOM_OPENAI_MODEL", ""),
+                temperature=temperature,
+                max_tokens=int(os.getenv("CUSTOM_OPENAI_MAX_TOKENS", "4096")),
+                base_url=os.getenv("CUSTOM_OPENAI_BASE_URL"),
+                api_key=os.getenv("CUSTOM_OPENAI_API_KEY"),
+            ),
         }
         return model_type_to_parameters.get(model_type, cls.default())
 
@@ -73,6 +91,32 @@ class ChatModelParameters(BaseModel):
                 model=self.model_name,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+            )
+        elif self.provider == "openai_compatible":
+            import httpx
+
+            base_url = self.base_url or os.getenv("CUSTOM_OPENAI_BASE_URL")
+            api_key = self.api_key or os.getenv("CUSTOM_OPENAI_API_KEY")
+            if not self.model_name:
+                raise ValueError("CUSTOM_OPENAI_MODEL is not set.")
+            if not base_url:
+                raise ValueError("CUSTOM_OPENAI_BASE_URL is not set.")
+            if not api_key:
+                raise ValueError("CUSTOM_OPENAI_API_KEY is not set.")
+            if api_key in {"你的key", "your_key", "<YOUR_API_KEY>"}:
+                raise ValueError("CUSTOM_OPENAI_API_KEY is a placeholder. Please replace it with your real API key.")
+            try:
+                api_key.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise ValueError("CUSTOM_OPENAI_API_KEY must contain ASCII characters only.") from exc
+            normalized_base_url = self._normalize_openai_base_url(base_url)
+            return ChatOpenAI(
+                model=self.model_name,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                base_url=normalized_base_url,
+                api_key=api_key,
+                http_client=httpx.Client(timeout=60.0, trust_env=False),
             )
         elif self.provider == "anthropic":
             return ChatAnthropic(

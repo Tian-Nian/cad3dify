@@ -25,7 +25,7 @@ def execute_python_code(code: str, model_type: MODEL_TYPE = "gpt", only_execute:
     tools = [PythonREPLTool()]
 
     if only_execute:
-        return tools[0].run(code)
+        return tools[0].invoke({"query": code})
 
     llm = ChatModelParameters.from_model_name(model_type).create_chat_model()
 
@@ -48,5 +48,12 @@ def execute_python_code(code: str, model_type: MODEL_TYPE = "gpt", only_execute:
         f"```python\n{code}\n```"
     )
 
-    result = agent_executor.invoke({"input": user_input})
-    return result["output"]
+    try:
+        result = agent_executor.invoke({"input": user_input})
+        return result["output"]
+    except TypeError as exc:
+        # Some OpenAI-compatible endpoints may emit malformed tool calls without arguments.
+        # Fallback to direct execution so the pipeline can continue.
+        if "PythonREPLTool._run() missing 1 required positional argument: 'query'" in str(exc):
+            return tools[0].invoke({"query": code})
+        raise

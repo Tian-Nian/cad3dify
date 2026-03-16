@@ -24,7 +24,7 @@ class CadCodeRefinerChain(SequentialChain):
             "## Start here\n"
             "Corrected code:"
         )
-        if model_type in ["gpt", "claude", "gemini"]:
+        if model_type in ["gpt", "claude", "gemini", "custom"]:
             prompt = ChatPromptTemplate(
                 input_variables=[
                     "code",
@@ -104,20 +104,19 @@ class CadCodeRefinerChain(SequentialChain):
             and "code" in inputs
             and isinstance(inputs["code"], str)
         ), "inputs must have 'original_input' and 'rendered_result' and 'code' keys"
-        if self.model_type in ["gpt", "claude", "gemini"]:
-            if self.model_type == "claude" and inputs["original_input"].type != "png":
+        if self.model_type in ["gpt", "claude", "gemini", "custom"]:
+            if self.model_type in ["claude", "custom"] and inputs["original_input"].type != "png":
                 # if the image type is not png and the model is claude, convert it to png.
                 inputs["original_input"] = inputs["original_input"].convert("png")
                 inputs["rendered_result"] = inputs["rendered_result"].convert("png")
-            inputs["original_image_type"] = inputs["original_input"].type
+            inputs["original_image_type"] = inputs["original_input"].media_type
             inputs["original_image_data"] = inputs["original_input"].data
-            inputs["rendered_image_type"] = inputs["rendered_result"].type
+            inputs["rendered_image_type"] = inputs["rendered_result"].media_type
             inputs["rendered_image_data"] = inputs["rendered_result"].data
         elif self.model_type == "llama":
-            inputs["original_and_rendered_image_type"] = inputs["original_input"].type
-            inputs["original_and_rendered_image_data"] = inputs["original_input"].merge(
-                inputs["rendered_result"]
-            )
+            merged = inputs["original_input"].merge(inputs["rendered_result"])
+            inputs["original_and_rendered_image_type"] = merged.media_type
+            inputs["original_and_rendered_image_data"] = merged.data
         else:
             raise ValueError(f"Invalid model type: {self.model_type}")
         inputs["code"] = inputs["code"]
