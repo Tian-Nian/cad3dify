@@ -1,5 +1,0 @@
-{
-  "model_type": "gpt",
-  "source_image": "/home/user/project/cad3dify/runs/test_debug/input.jpg",
-  "output_filename": "output.step"
-}

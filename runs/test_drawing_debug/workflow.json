@@ -1,5 +1,0 @@
-{
-  "model_type": "custom",
-  "source_image": "/home/user/project/cad3dify/runs/test_drawing_debug/input.jpg",
-  "output_filename": "output.step"
-}
