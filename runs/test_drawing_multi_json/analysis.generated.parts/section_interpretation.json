@@ -1,0 +1,17 @@
+{
+  "hatched_regions_are_solid": true,
+  "unhatched_regions_are_void": true,
+  "datum_or_reference_face": "bottom",
+  "notes": [
+    "Section A-A cuts horizontally through center showing stepped internal bore profile",
+    "Hatched regions on left and right sides represent solid flange material",
+    "Central unhatched region is through bore void with stepped diameters",
+    "Three distinct axial layers visible: lower flange (9mm), middle body (11mm), upper rim (8mm), total 28mm",
+    "Internal bore steps from ø99.00 at bottom through ø105.00 to ø115.00 at top opening",
+    "Outer diameter is ø139.00 at lower flange",
+    "Upper section shows reduced outer diameter at approximately ø129.00",
+    "R2.00 fillet shown at internal step transition on right side of section",
+    "Bolt holes on ø115.00 PCD not directly intersected by section cutting plane",
+    "Bottom face serves as datum A for flatness and perpendicularity controls"
+  ]
+}

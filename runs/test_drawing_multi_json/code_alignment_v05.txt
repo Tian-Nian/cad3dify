@@ -1,0 +1,28 @@
+# Code Alignment Report
+
+## Contract
+{
+  "top_view_present": true,
+  "section_view_present": true,
+  "outer_diameter_flange": 139.0,
+  "outer_diameter_body": 115.0,
+  "inner_diameter_upper": 105.0,
+  "inner_diameter_bore": 99.0,
+  "recess_seat_diameter": 129.0,
+  "total_height": 28.0,
+  "lower_flange_height": 9.0,
+  "middle_body_height": 8.0,
+  "upper_flange_height": 11.0,
+  "upper_opening_diameter": 105.0,
+  "hole_count": 12,
+  "bolt_circle_diameter": 129.0,
+  "hole_start_face": "upper_step",
+  "hole_layer": "upper_flange",
+  "needs_bottom_outer_chamfer": true,
+  "needs_inner_fillet": true,
+  "needs_recessed_hole_seat": true
+}
+
+## Issues
+- 代码仍然从最上表面启动孔阵列，与 JSON 的 upper_step 起始面冲突。
+- JSON 要求孔作用于 upper_flange，但代码未把孔深绑定到 upper_flange_height。

@@ -1,0 +1,97 @@
+{
+  "global_constraints": [
+    {
+      "id": "gc_01",
+      "description": "Part is axisymmetric about central vertical axis",
+      "type": "symmetry",
+      "axis": "Z"
+    },
+    {
+      "id": "gc_02",
+      "description": "Total height is 28.00 mm from bottom face (datum A) to top face",
+      "dimension": "total_height",
+      "value_mm": 28.0,
+      "datum": "A"
+    },
+    {
+      "id": "gc_03",
+      "description": "Outer flange diameter is 139.00 mm",
+      "dimension": "outer_diameter_flange",
+      "value_mm": 139.0
+    },
+    {
+      "id": "gc_04",
+      "description": "Central bore diameter is 99.00 mm, passes through entire part",
+      "dimension": "inner_diameter_bore",
+      "value_mm": 99.0
+    },
+    {
+      "id": "gc_05",
+      "description": "12 holes M6 threaded, equally spaced on bolt circle",
+      "pattern": "bolt_hole_pattern",
+      "count": 12,
+      "thread": "M6",
+      "spacing": "equal_angular_30_deg"
+    },
+    {
+      "id": "gc_06",
+      "description": "Bolt circle diameter is 129.00 mm (hole centers)",
+      "dimension": "bolt_circle_diameter",
+      "value_mm": 129.0
+    },
+    {
+      "id": "gc_07",
+      "description": "R2.00 fillet at upper-right internal corner transition in section view",
+      "feature": "fillet_inner",
+      "radius_mm": 2.0,
+      "type": "fillet",
+      "adjoining_faces": [
+        "upper_bore_wall",
+        "stepped_floor"
+      ]
+    },
+    {
+      "id": "gc_08",
+      "description": "Upper recess seat diameter 115.00 mm",
+      "dimension": "recess_seat_diameter",
+      "value_mm": 115.0
+    },
+    {
+      "id": "gc_09",
+      "description": "Intermediate bore step diameter 105.00 mm",
+      "dimension": "inner_diameter_upper",
+      "value_mm": 105.0
+    },
+    {
+      "id": "gc_10",
+      "description": "Surface finish Ra1.6 on bottom face and internal bore (datum A faces)",
+      "surface_finish": "Ra1.6",
+      "applies_to": [
+        "bottom_face",
+        "central_bore"
+      ]
+    },
+    {
+      "id": "gc_11",
+      "description": "Surface finish Ra6.3 on top flange face",
+      "surface_finish": "Ra6.3",
+      "applies_to": [
+        "top_face"
+      ]
+    },
+    {
+      "id": "gc_12",
+      "description": "Flatness 0.1 on bottom face (datum A)",
+      "tolerance_type": "flatness",
+      "value_mm": 0.1,
+      "applies_to": "bottom_face"
+    },
+    {
+      "id": "gc_13",
+      "description": "Flatness 0.25 on top face relative to datum A",
+      "tolerance_type": "flatness",
+      "value_mm": 0.25,
+      "applies_to": "top_face"
+    }
+  ]
+}

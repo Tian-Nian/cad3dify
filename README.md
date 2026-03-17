@@ -1,6 +1,6 @@
 # cad3dify
 
-Using GPT-5 (or Claude 4.5 opus, Gemini 3 pro, Llama 3.2 on Vertex AI), generate a 3D CAD model (STEP file) from a 2D CAD image.
+Using GPT-5 (or Claude 4.5 opus, Gemini 3 pro, Llama 3.2 on Vertex AI), generate a staged 3D CAD workflow from a 2D CAD image.
 
 ## Getting started
 
@@ -12,24 +12,39 @@ cd cad3dify
 poetry install
 ```
 
-Run script.
-A STEP`file ("output.step") will be generated.
+Run the command line workflow. Each stage writes its artifacts to disk so you can inspect and edit them before continuing.
 
 ```bash
-cd scripts
 export OPENAI_API_KEY=<YOUR API KEY>
-python cli.py <2D CAD Image File>
+python scripts/cli.py start sample_data/g1-3.jpg --workspace_dir runs/case1 --output_filepath output.step
 ```
 
-Or run streamlit spp
+Continue after manually editing the saved JSON or Python files.
 
 ```bash
-streamlit run scripts/app.py
-streamlit run scripts/app.py -- --model_type claude  # Use Claude 4.5 sonnet
-streamlit run scripts/app.py -- --model_type gemini  # Use Gemini 3.0 pro preview
-streamlit run scripts/app.py -- --model_type llama  # Use Llama 3.2 on Vertex AI
-streamlit run scripts/app.py -- --model_type custom  # Use your OpenAI-compatible endpoint
+python scripts/cli.py continue --workspace_dir runs/case1
+python scripts/cli.py run-step refine-code --workspace_dir runs/case1
+python scripts/cli.py run-step execute-code --workspace_dir runs/case1
 ```
+
+Main workflow artifacts:
+
+```text
+workflow.json
+input.<ext>
+analysis.generated.json
+analysis.generated.parts/
+analysis.json
+analysis.parts/
+model_v01.generated.py
+model_v01.py
+execution_v01.log
+output_v01.step
+refine_feedback.txt
+```
+
+The first AI interaction converts the image into analysis.generated.json. After review, analysis.json becomes the editable source of truth. Later AI iterations compare and refine against the JSON specification, not against a rendered STEP image.
+If the drawing analysis is too large for a single JSON document, the workflow also stores split documents under analysis.parts/ and analysis.generated.parts/. The later generation and refinement stages read those JSON documents sequentially and combine their constraints before producing CAD code.
 
 Custom model endpoint (OpenAI-compatible API).
 
@@ -38,19 +53,22 @@ export CUSTOM_OPENAI_BASE_URL="https://your-model-endpoint.example.com/v1"
 export CUSTOM_OPENAI_API_KEY="<YOUR_API_KEY>"
 export CUSTOM_OPENAI_MODEL="your-model-name"
 export CUSTOM_OPENAI_MAX_TOKENS="4096"
-streamlit run scripts/app.py -- --model_type custom
+python scripts/cli.py start sample_data/g1-3.jpg --workspace_dir runs/case1 --model_type custom
 ```
 
 ## Architecture
 
 ```mermaid
 graph TD
-    Input((Input Image)) --> CodeGenerator(CAD Code Generator AI Agent)
-    CodeGenerator --> PythonDebugger(Python Execution and Debugging AI Agent)
-    PythonDebugger --> StepFile((STEP File))
-    StepFile --> Rendering(Rendering 3D CAD Model Image from STEP File)
-    Rendering --> Refiner(CAD Code Refiner AI Agent)
-    Refiner --> PythonDebugger
+    Input((Input Image)) --> Analyzer(Drawing Analysis AI Agent)
+    Analyzer --> JsonSpec((Editable JSON Spec))
+    JsonSpec --> CodeGenerator(CAD Code Generator AI Agent)
+    CodeGenerator --> EditableCode((Editable Python Code))
+    EditableCode --> Executor(Local Python Execution)
+    Executor --> StepFile((STEP File))
+    JsonSpec --> Refiner(CAD Code Refiner AI Agent)
+    EditableCode --> Refiner
+    Refiner --> EditableCode
 ```
 
 ## Demo

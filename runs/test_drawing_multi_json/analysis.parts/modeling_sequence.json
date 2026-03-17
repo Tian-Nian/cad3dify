@@ -1,0 +1,84 @@
+{
+  "modeling_sequence": [
+    {
+      "step": 1,
+      "operation": "create_cylinder",
+      "description": "Create base solid cylinder at outer flange diameter",
+      "parameters": {
+        "diameter_mm": 139.0,
+        "height_mm": 28.0
+      },
+      "material_action": "keep"
+    },
+    {
+      "step": 2,
+      "operation": "bore_through",
+      "description": "Remove central bore through entire height",
+      "parameters": {
+        "diameter_mm": 99.0,
+        "start_face": "bottom_face",
+        "depth": "through"
+      },
+      "material_action": "remove",
+      "maps_to_section_band": "central_void_full_height",
+      "maps_to_top_view": "central_bore"
+    },
+    {
+      "step": 3,
+      "operation": "counterbore_recess",
+      "description": "Create upper stepped recess from top face down 11.00 mm at diameter 105.00",
+      "parameters": {
+        "diameter_mm": 105.0,
+        "start_face": "top_face",
+        "depth_mm": 11.0
+      },
+      "material_action": "remove",
+      "maps_to_section_band": "upper_stepped_void",
+      "top_view_visibility": "visible_through_upper_opening",
+      "true_face": "stepped_floor_at_Z17"
+    },
+    {
+      "step": 4,
+      "operation": "counterbore_outer_recess",
+      "description": "Create outer annular recess from top face at diameter 115.00 to 139.00, depth 9.00 mm",
+      "parameters": {
+        "outer_diameter_mm": 139.0,
+        "inner_diameter_mm": 115.0,
+        "start_face": "top_face",
+        "depth_mm": 9.0
+      },
+      "material_action": "remove",
+      "maps_to_section_band": "top_outer_annular_void",
+      "creates_recessed_seat": true
+    },
+    {
+      "step": 5,
+      "operation": "fillet",
+      "description": "Apply R2.00 fillet at internal corner where bore steps from 99.00 to 105.00",
+      "parameters": {
+        "radius_mm": 2.0,
+        "edge_location": "internal_step_corner"
+      },
+      "material_action": "remove",
+      "explicit_callout": "R2.00",
+      "must_not_collapse_to_step": true
+    },
+    {
+      "step": 6,
+      "operation": "hole_pattern",
+      "description": "Create 12x M6 threaded holes on PCD 129.00",
+      "parameters": {
+        "count": 12,
+        "thread": "M6",
+        "pcd_mm": 129.0,
+        "start_face": "recessed_seat_floor_at_Z19",
+        "depth": "through_flange"
+      },
+      "material_action": "remove",
+      "maps_to_top_view": "bolt_hole_pattern",
+      "top_view_visibility": "visible_on_recessed_floor",
+      "true_start_face": "recessed_seat_Z19",
+      "note": "Holes visible in top view through upper annular recess but start from recessed floor, not outer top rim"
+    }
+  ]
+}

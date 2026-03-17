@@ -1,0 +1,173 @@
+{
+  "name": "top_view",
+  "view_type": "top",
+  "summary": "Circular flange with 12 equally spaced M6 threaded holes on a bolt circle, and a large central bore opening. The outer silhouette is the flange OD, with bolt holes visible on the top face annular rim, and a central through-bore.",
+  "contour_stack": [
+    {
+      "order": 1,
+      "diameter": 139.0,
+      "role": "outer_silhouette",
+      "material_state": "solid_boundary",
+      "visible_on_face": "top_face",
+      "appearance_reason": "direct_edge_on_current_face",
+      "owned_by_section_band": "lower_flange",
+      "evidence": "Outermost circle corresponds to ø139.00 dimension in section view, representing the flange outer diameter"
+    },
+    {
+      "order": 2,
+      "diameter": 129.0,
+      "role": "recess_boundary",
+      "material_state": "transition",
+      "visible_on_face": "top_face",
+      "appearance_reason": "direct_edge_on_current_face",
+      "owned_by_section_band": "upper_flange",
+      "evidence": "Dimension 129.00 shown in section as upper portion diameter, visible as step edge on top face"
+    },
+    {
+      "order": 3,
+      "diameter": 115.0,
+      "role": "pattern_reference",
+      "material_state": "reference_only",
+      "visible_on_face": "top_face",
+      "appearance_reason": "direct_edge_on_current_face",
+      "owned_by_section_band": "upper_flange",
+      "evidence": "ø115.00 from section view corresponds to bolt circle diameter for 12xM6 holes; holes shown on top annular face"
+    },
+    {
+      "order": 4,
+      "diameter": 105.0,
+      "role": "visible_opening",
+      "material_state": "void",
+      "visible_on_face": "top_face",
+      "appearance_reason": "direct_edge_on_current_face",
+      "owned_by_section_band": "upper_flange",
+      "evidence": "ø105.00 dimension in section shows inner bore opening at top face level"
+    },
+    {
+      "order": 5,
+      "diameter": 99.0,
+      "role": "hidden_only",
+      "material_state": "void",
+      "visible_on_face": "internal_floor",
+      "appearance_reason": "seen_through_upper_opening",
+      "owned_by_section_band": "middle_body",
+      "evidence": "ø99.00 shown in section as narrower bore diameter below upper opening, visible through ø105 opening"
+    }
+  ],
+  "entities": [
+    {
+      "id": "bolt_hole_pattern",
+      "type": "hole_pattern",
+      "pattern_type": "circular",
+      "hole_count": 12,
+      "hole_spec": "M6",
+      "hole_type": "threaded",
+      "bolt_circle_diameter": 115.0,
+      "angular_spacing": 30.0,
+      "material_state": "void",
+      "visible_on_face": "top_face",
+      "axial_extent": "unknown_depth",
+      "feature_placement": "top_annular_rim_between_129_and_105",
+      "evidence": "12xM6 callout in top view, holes shown equally spaced on bolt circle, located on solid annular region of top face"
+    },
+    {
+      "id": "central_bore",
+      "type": "through_hole",
+      "shape": "circular",
+      "upper_diameter": 105.0,
+      "lower_diameter": 99.0,
+      "material_state": "void",
+      "visible_on_face": "top_face",
+      "axial_extent": "through_part",
+      "feature_placement": "center",
+      "evidence": "Central opening visible in top view, section confirms stepped bore from ø105 to ø99"
+    },
+    {
+      "id": "upper_opening",
+      "type": "bore_opening",
+      "diameter": 105.0,
+      "material_state": "void",
+      "visible_on_face": "top_face",
+      "axial_extent": "upper_portion",
+      "feature_placement": "center",
+      "evidence": "ø105.00 is the top-level bore opening diameter per section view"
+    }
+  ],
+  "dimensions": [
+    {
+      "label": "outer_diameter_flange",
+      "value": 139.0,
+      "unit": "mm",
+      "applies_to": "outer_silhouette"
+    },
+    {
+      "label": "outer_diameter_body",
+      "value": 129.0,
+      "unit": "mm",
+      "applies_to": "upper_body_diameter"
+    },
+    {
+      "label": "bolt_circle_diameter",
+      "value": 115.0,
+      "unit": "mm",
+      "applies_to": "bolt_hole_pattern"
+    },
+    {
+      "label": "inner_diameter_upper",
+      "value": 105.0,
+      "unit": "mm",
+      "applies_to": "upper_opening"
+    },
+    {
+      "label": "inner_diameter_bore",
+      "value": 99.0,
+      "unit": "mm",
+      "applies_to": "central_bore_lower"
+    },
+    {
+      "label": "hole_spec",
+      "value": "M6",
+      "quantity": 12,
+      "applies_to": "bolt_hole_pattern"
+    }
+  ],
+  "cross_view_mapping": [
+    {
+      "top_contour_order": 1,
+      "section_band_id": "lower_flange",
+      "section_face": "top_face",
+      "relationship": "same_edge"
+    },
+    {
+      "top_contour_order": 2,
+      "section_band_id": "upper_flange",
+      "section_face": "top_face",
+      "relationship": "same_edge"
+    },
+    {
+      "top_contour_order": 3,
+      "section_band_id": "upper_flange",
+      "section_face": "top_face",
+      "relationship": "hole_on_visible_floor"
+    },
+    {
+      "top_contour_order": 4,
+      "section_band_id": "upper_flange",
+      "section_face": "top_face",
+      "relationship": "opening_to_band"
+    },
+    {
+      "top_contour_order": 5,
+      "section_band_id": "middle_body",
+      "section_face": "internal_floor",
+      "relationship": "edge_of_visible_floor"
+    }
+  ],
+  "notes": [
+    "Bolt holes are M6 threaded, 12 equally spaced at 30° intervals on PCD ø115",
+    "Central bore is stepped: ø105 upper opening transitions to ø99 lower bore",
+    "Section shows R2.00 fillet at inner bore transition but this does not create additional top-view contour",
+    "Bolt hole depth not dimensioned in top view; requires section view confirmation",
+    "The ø115 bolt circle lies within the ø129 body diameter and outside the ø105 bore opening, confirming holes are on the solid annular top face"
+  ]
+}

@@ -53,9 +53,22 @@ class ImageData(BaseModel):
             ImageData: 图像数据
         """
         with open(file_path, "rb") as f:
-            data = base64.b64encode(f.read()).decode("utf-8")
-        ext = os.path.splitext(file_path)[1][1:]
-        return cls(data=data, type=cls._normalize_type(ext))
+            raw_bytes = f.read()
+
+        detected_type: str | None = None
+        try:
+            with Image.open(io.BytesIO(raw_bytes)) as image:
+                if image.format:
+                    detected_type = image.format.lower()
+        except Exception:
+            detected_type = None
+
+        if detected_type is None:
+            detected_type = os.path.splitext(file_path)[1][1:]
+
+        normalized_type = cls._normalize_type(detected_type)
+        data = base64.b64encode(raw_bytes).decode("utf-8")
+        return cls(data=data, type=normalized_type)
 
     def merge(self, other: "ImageData") -> "ImageData":
         """合并两张图像数据

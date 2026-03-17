@@ -1,0 +1,205 @@
+{
+  "name": "section_A-A",
+  "view_type": "section",
+  "summary": "Stepped cylindrical flange with central bore, upper recess cavity, and outer flange. Three distinct axial regions: lower flange (9mm), middle body (11mm), upper rim (8mm). Central bore Ø99 through full height. Upper cavity opens to Ø105 from top, creating internal floor visible from above. Fillet R2.00 at upper internal corner.",
+  "axial_bands": [
+    {
+      "band_id": "lower_flange",
+      "band_role": "solid_wall",
+      "axial_start": 0,
+      "axial_end": 9,
+      "outer_diameter": 139,
+      "inner_diameter": 99,
+      "annular_region": "solid",
+      "top_visibility": "not_visible_from_above",
+      "evidence": "Hatched region from Z=0 to Z=9. OD=139 (outer_diameter_flange), ID=99 (inner_diameter_bore). Solid flange base."
+    },
+    {
+      "band_id": "middle_body",
+      "band_role": "solid_wall",
+      "axial_start": 9,
+      "axial_end": 20,
+      "outer_diameter": 129,
+      "inner_diameter": 99,
+      "annular_region": "solid",
+      "top_visibility": "not_visible_from_above",
+      "evidence": "Hatched region from Z=9 to Z=20. OD steps in to 129, ID remains 99. Solid wall section."
+    },
+    {
+      "band_id": "upper_rim_outer",
+      "band_role": "top_rim",
+      "axial_start": 20,
+      "axial_end": 28,
+      "outer_diameter": 139,
+      "inner_diameter": 115,
+      "annular_region": "solid",
+      "top_visibility": "visible_from_above",
+      "evidence": "Hatched outer ring from Z=20 to Z=28. OD=139 flange returns, ID=115 defines upper opening. Top face visible."
+    },
+    {
+      "band_id": "upper_cavity",
+      "band_role": "upper_opening",
+      "axial_start": 20,
+      "axial_end": 28,
+      "outer_diameter": 115,
+      "inner_diameter": 105,
+      "annular_region": "void",
+      "top_visibility": "visible_from_above",
+      "evidence": "Unhatched region between Ø115 and Ø105 from Z=20 to Z=28. Open cavity, void space."
+    },
+    {
+      "band_id": "upper_inner_wall",
+      "band_role": "solid_wall",
+      "axial_start": 20,
+      "axial_end": 28,
+      "outer_diameter": 105,
+      "inner_diameter": 99,
+      "annular_region": "solid",
+      "top_visibility": "visible_from_above",
+      "evidence": "Hatched inner ring from Z=20 to Z=28. OD=105, ID=99 (central bore). Creates internal floor at Z=20 visible through upper opening."
+    },
+    {
+      "band_id": "central_bore",
+      "band_role": "middle_bore",
+      "axial_start": 0,
+      "axial_end": 28,
+      "outer_diameter": 99,
+      "inner_diameter": 0,
+      "annular_region": "void",
+      "top_visibility": "visible_from_above",
+      "evidence": "Through hole Ø99 full height. Central void."
+    }
+  ],
+  "entities": [
+    {
+      "id": "central_bore",
+      "type": "through_hole",
+      "diameter": 99,
+      "start_face": "bottom",
+      "end_face": "top",
+      "depth": 28,
+      "evidence": "Ø99.00 dimension shown, unhatched center region through full section height."
+    },
+    {
+      "id": "upper_recess_cavity",
+      "type": "annular_groove",
+      "outer_diameter": 115,
+      "inner_diameter": 105,
+      "start_face": "top",
+      "depth": 8,
+      "floor_z": 20,
+      "evidence": "Unhatched annular void between Ø115 and Ø105, depth 8mm from top (28-20=8)."
+    },
+    {
+      "id": "fillet_inner",
+      "type": "fillet",
+      "radius": 2.0,
+      "location": "upper_internal_corner",
+      "adjoining_faces": [
+        "internal_floor_at_Z20",
+        "inner_vertical_wall_Ø105"
+      ],
+      "evidence": "R2.00 callout at corner where internal floor meets Ø105 wall."
+    },
+    {
+      "id": "internal_floor",
+      "type": "horizontal_face",
+      "z_level": 20,
+      "outer_diameter": 105,
+      "inner_diameter": 99,
+      "visibility": "visible_from_above_through_upper_opening",
+      "evidence": "Annular floor at Z=20 created by upper cavity, bounded by Ø105 (outer) and Ø99 (central bore)."
+    }
+  ],
+  "dimensions": [
+    {
+      "label": "total_height",
+      "value": 28,
+      "unit": "mm",
+      "evidence": "28.00 dimension on left side of section"
+    },
+    {
+      "label": "lower_flange_height",
+      "value": 9,
+      "unit": "mm",
+      "evidence": "9.00 dimension marking lower flange thickness"
+    },
+    {
+      "label": "middle_body_height",
+      "value": 11,
+      "unit": "mm",
+      "evidence": "11.00 dimension marking middle section height"
+    },
+    {
+      "label": "upper_flange_height",
+      "value": 8,
+      "unit": "mm",
+      "evidence": "Calculated: 28 - 20 = 8mm, upper rim portion"
+    },
+    {
+      "label": "outer_diameter_flange",
+      "value": 139,
+      "unit": "mm",
+      "evidence": "Ø139.00 dimension at bottom, largest OD"
+    },
+    {
+      "label": "outer_diameter_body",
+      "value": 129,
+      "unit": "mm",
+      "evidence": "129.00 dimension at top of section, middle body OD"
+    },
+    {
+      "label": "inner_diameter_upper",
+      "value": 115,
+      "unit": "mm",
+      "evidence": "Ø115.00 dimension, upper opening inner edge"
+    },
+    {
+      "label": "recess_seat_diameter",
+      "value": 105,
+      "unit": "mm",
+      "evidence": "Ø105.00 dimension, inner wall of upper cavity"
+    },
+    {
+      "label": "inner_diameter_bore",
+      "value": 99,
+      "unit": "mm",
+      "evidence": "Ø99.00 dimension, central through bore"
+    },
+    {
+      "label": "fillet_radius_inner",
+      "value": 2.0,
+      "unit": "mm",
+      "evidence": "R2.00 callout at upper internal corner"
+    }
+  ],
+  "cross_view_mapping": [
+    {
+      "section_feature": "internal_floor",
+      "top_view_contour": "Ø105 visible circle",
+      "mapping_note": "Internal floor at Z=20 with OD=105 visible from above through Ø115 opening"
+    },
+    {
+      "section_feature": "upper_recess_cavity",
+      "top_view_contour": "Ø115 visible circle",
+      "mapping_note": "Upper opening edge at Ø115, top face level"
+    },
+    {
+      "section_feature": "central_bore",
+      "top_view_contour": "Ø99 innermost circle",
+      "mapping_note": "Central bore visible through all upper openings"
+    },
+    {
+      "section_feature": "outer_flange_silhouette",
+      "top_view_contour": "Ø139 outer edge",
+      "mapping_note": "Outer flange boundary, top rim outer edge"
+    }
+  ],
+  "notes": [
+    "Section cutting plane A-A does not intersect bolt hole axes; bolt holes not directly visible in section hatching.",
+    "Bolt hole PCD not dimensioned in section view; do not infer from profile diameters 129, 115, or 105.",
+    "Upper cavity creates annular void where bolt holes likely pass through, but start face requires top view correlation.",
+    "Three Z-levels create visible contours from above: Z=28 (top face with Ø139 and Ø115), Z=20 (internal floor with Ø105 and Ø99).",
+    "Surface finish callouts: Ra1.6 on bore and bottom face, Ra6.3 on other surfaces."
+  ]
+}

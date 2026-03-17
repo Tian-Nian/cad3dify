@@ -1,3 +1,4 @@
+import json
 import re
 import textwrap
 from typing import Any, Union
@@ -11,18 +12,19 @@ from ..image import ImageData
 
 
 def _parse_code(input: dict) -> dict:
-    text = input.get("text", "")
-    match = re.search(r"```(?:python)?\n(.*?)\n```", text, re.DOTALL)
+    match = re.search(r"```(?:python)?\n(.*?)\n```", input["text"], re.DOTALL)
     if match:
         code_output = match.group(1).strip()
         return {"result": code_output}
-    # Some OpenAI-compatible endpoints return raw code without markdown fences.
-    code_output = text.strip()
-    if code_output.startswith("```") and code_output.endswith("```"):
-        code_output = re.sub(r"^```(?:python)?\n?", "", code_output)
-        code_output = re.sub(r"\n?```$", "", code_output)
-        code_output = code_output.strip()
-    return {"result": code_output if code_output else None}
+    else:
+        return {"result": None}
+
+
+def _normalize_spec_json(input: dict) -> dict:
+    analysis_json = input["analysis_json"]
+    if isinstance(analysis_json, str):
+        return {"analysis_json_text": analysis_json}
+    return {"analysis_json_text": json.dumps(analysis_json, ensure_ascii=False, indent=2)}
 
 
 _cad_query_examples = [
@@ -329,8 +331,87 @@ class CadCodeGeneratorChain(SequentialChain):
         ), "inputs must be ImageData or dict with 'input' and 'input' must be ImageData"
         if isinstance(inputs, ImageData):
             inputs = {"input": inputs}
-        if self.model_type in ["claude", "custom"] and inputs["input"].type != "png":
+        if self.model_type == "claude" and inputs["input"].type != "png":
             inputs["input"] = inputs["input"].convert("png")
-        inputs["image_type"] = inputs["input"].media_type
+        inputs["image_type"] = inputs["input"].type
         inputs["image_data"] = inputs["input"].data
         return inputs
+
+
+class CadCodeFromJsonGeneratorChain(SequentialChain):
+    model_type: MODEL_TYPE = "gpt"
+
+    def __init__(self, model_type: MODEL_TYPE = "gpt") -> None:
+        sample_codes = "\n\n".join(
+            [f"{explanation}\n```python\n{code}\n```" for explanation, code in _cad_query_examples]
+        )
+        gen_cad_code_prompt = (
+            "You are a highly skilled CAD designer. Write CadQuery code from the provided CAD drawing specification JSON.\n"
+            "The JSON is the source of truth. If the JSON and your intuition conflict, follow the JSON.\n"
+            "Your output will be checked by a strict validator for dimension coverage, feature coverage, hole start face, and chamfer/fillet presence.\n"
+            "## Requirements\n"
+            "* Use `cadquery.exporters.export` to output the created 3D model as a STEP file.\n"
+            "* Where you describe the output file path, use the template string `${{output_filename}}`.\n"
+            "* Define key dimensions as variables.\n"
+            "* Add brief comments only where they help a human review the modeling sequence.\n"
+            "* Surround the code with a markdown code block.\n"
+            "* If the JSON contains uncertainty, choose the most conservative interpretation and encode the choice in comments.\n"
+            "* Respect `section_interpretation`, `material_state`, `axial_extent`, and `feature_placement`. In particular, never place a cut on the top face if the JSON says it belongs to a lower flange or starts from another layer.\n"
+            "* Treat hatched section regions as solid and unhatched enclosed regions as void/cut.\n"
+            "* The code must cover every major geometric item present in the JSON contract: outer diameters, inner bores, axial heights, hole count, hole PCD, hole start face, fillets, and chamfers.\n"
+            "* The final solid must satisfy both views at once: the top-view contour order and the section-view axial band stack must describe the same geometry.\n"
+            "* When the JSON distinguishes visible top openings from deeper hidden bores, model them as different geometric steps rather than collapsing them into one hole.\n"
+            "* When the JSON says a contour or hole is visible from above on an internal floor or recessed face, do not convert that visibility into a top-face operation. Visibility face and true start face are different facts and must both be preserved.\n"
+            "* If the top view contains circles from multiple Z levels, model those Z levels explicitly. A visible lower-floor circle seen through an upper opening is not the same as a contour on the top rim.\n"
+            "* When the JSON says a ring/annulus is solid in section, preserve that material. When it says a region is void or removed, cut it explicitly.\n"
+            "* If a hole feature lacks section evidence for top-face placement, do not default to drilling from the top face. Prefer the explicitly stated lower/intermediate layer, or leave a clear TODO-style comment if the JSON marks the placement as unknown.\n"
+            "* The code must run successfully in CadQuery without manual fixes. Prefer robust, simple selectors over fragile edge-selection logic.\n"
+            "* Assume no one will patch your output by hand. The orchestration will execute this code as-is and only ask for a new full version if it fails.\n"
+            "* If the JSON explicitly defines a fillet/chamfer with size and location, model it explicitly. Do not replace an explicit R fillet with a sharp step or a chamfer just to avoid selector fragility.\n"
+            "* Prefer sketch/profile arcs, revolved profiles, or constructive geometry over fragile post-hoc edge selectors when modeling explicit fillets/chamfers.\n"
+            "* If an explicit R fillet belongs to a revolved or section-defined profile transition, build that round directly into the profile with an arc whenever practical instead of relying on a later edge selector.\n"
+            "* Do not wrap an explicit required fillet/chamfer in a try/except that silently falls back to `pass`. If a selector-based fillet is risky, change the construction strategy.\n"
+            "* Return one self-consistent final implementation, not a version that expects downstream manual touch-up.\n"
+            "* Do not include exploratory branches, duplicate model rebuilds, or fallback snippets that are not actually executed.\n"
+            "* Write code following these steps:\n"
+            f"{textwrap.indent(_design_steps, prefix='  ')}\n"
+            "## CAD Specification JSON\n"
+            "```json\n"
+            "{analysis_json_text}\n"
+            "```\n"
+            "## CadQuery Sample Code\n"
+            f"{sample_codes}\n"
+            "## Start here\n"
+            "Output code:"
+        )
+        prompt = ChatPromptTemplate(
+            input_variables=["analysis_json_text"],
+            messages=[
+                HumanMessagePromptTemplate(
+                    prompt=[PromptTemplate(input_variables=["analysis_json_text"], template=gen_cad_code_prompt)]
+                )
+            ],
+        )
+        llm = ChatModelParameters.from_model_name(model_type).create_chat_model()
+
+        super().__init__(
+            chains=[
+                TransformChain(
+                    input_variables=["analysis_json"],
+                    output_variables=["analysis_json_text"],
+                    transform=_normalize_spec_json,
+                    atransform=None,
+                ),
+                LLMChain(prompt=prompt, llm=llm),  # type: ignore
+                TransformChain(
+                    input_variables=["text"],
+                    output_variables=["result"],
+                    transform=_parse_code,
+                    atransform=None,
+                ),
+            ],
+            input_variables=["analysis_json"],
+            output_variables=["result"],
+            verbose=True,
+        )
+        self.model_type = model_type

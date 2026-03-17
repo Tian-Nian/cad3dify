@@ -1,0 +1,18 @@
+Command: /home/user/project/cad3dify/.venv/bin/python model_v02.py
+Return code: 1
+
+[stdout]
+
+
+[stderr]
+Traceback (most recent call last):
+  File "/home/user/project/cad3dify/runs/test_full_chain/model_v02.py", line 99, in <module>
+    .fillet(fillet_radius)
+     ~~~~~~^^^^^^^^^^^^^^^
+  File "/home/user/project/cad3dify/.venv/lib/python3.13/site-packages/cadquery/cq.py", line 1243, in fillet
+    s = solid.fillet(radius, edgeList)
+  File "/home/user/project/cad3dify/.venv/lib/python3.13/site-packages/cadquery/occ_impl/shapes.py", line 3732, in fillet
+    return self.__class__(fillet_builder.Shape())
+                          ~~~~~~~~~~~~~~~~~~~~^^
+OCP.OCP.Standard.Standard_Failure: There are no suitable edges for chamfer or fillet
+

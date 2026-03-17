@@ -1,0 +1,5 @@
+{
+  "model_type": "custom",
+  "source_image": "/home/user/project/cad3dify/runs/test_full_chain/input.jpg",
+  "output_filename": "output.step"
+}

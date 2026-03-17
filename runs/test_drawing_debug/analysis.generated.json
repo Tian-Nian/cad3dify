@@ -1,0 +1,353 @@
+{
+  "drawing_summary": {
+    "title": "Circular Flange with Bolt Holes",
+    "description": "A circular flange plate with central bore, stepped profile, and 12 equally spaced M6 threaded holes on a bolt circle",
+    "unit": "mm",
+    "assumptions": [
+      "Drawing is in millimeters based on dimension values",
+      "Part is axisymmetric and suitable for lathe/turning operations",
+      "M6 holes are through holes based on top view representation",
+      "Section A-A shows the cross-sectional profile of the revolved part"
+    ]
+  },
+  "views": [
+    {
+      "name": "top_view",
+      "view_type": "top",
+      "summary": "Circular flange showing 12 M6 holes arranged in circular pattern with central bore",
+      "entities": [
+        {
+          "name": "outer_flange_circle",
+          "shape": "circle",
+          "operation": "add",
+          "position": {
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "polar": {
+              "radius": 0.0,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": 139.0,
+            "radius_mm": 69.5,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": null,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "none",
+            "count": null,
+            "pitch_circle_diameter_mm": null,
+            "angle_step_deg": null
+          },
+          "notes": []
+        },
+        {
+          "name": "M6_threaded_holes",
+          "shape": "threaded_hole",
+          "operation": "cut",
+          "position": {
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "polar": {
+              "radius": 57.5,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": 6.0,
+            "radius_mm": 3.0,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": null,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "circular",
+            "count": 12,
+            "pitch_circle_diameter_mm": 115.0,
+            "angle_step_deg": 30.0
+          },
+          "notes": [
+            "12XM6 threaded holes equally spaced"
+          ]
+        }
+      ],
+      "dimensions": [
+        "12XM6 - 12 threaded holes M6"
+      ],
+      "notes": [
+        "Section line A-A shown through center"
+      ]
+    },
+    {
+      "name": "section_A-A",
+      "view_type": "section",
+      "summary": "Cross-sectional view showing stepped flange profile with dimensions",
+      "entities": [
+        {
+          "name": "main_flange_body",
+          "shape": "revolved_profile",
+          "operation": "add",
+          "position": {
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "polar": {
+              "radius": 0.0,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": 139.0,
+            "radius_mm": 69.5,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": 28.0,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "none",
+            "count": null,
+            "pitch_circle_diameter_mm": null,
+            "angle_step_deg": null
+          },
+          "notes": [
+            "Overall height 28mm"
+          ]
+        },
+        {
+          "name": "upper_flange_step",
+          "shape": "cylinder",
+          "operation": "add",
+          "position": {
+            "xyz": [
+              0.0,
+              0.0,
+              17.0
+            ],
+            "polar": {
+              "radius": 0.0,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": 139.0,
+            "radius_mm": 69.5,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": 11.0,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "none",
+            "count": null,
+            "pitch_circle_diameter_mm": null,
+            "angle_step_deg": null
+          },
+          "notes": [
+            "Upper portion of flange"
+          ]
+        },
+        {
+          "name": "central_bore",
+          "shape": "cylinder",
+          "operation": "cut",
+          "position": {
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "polar": {
+              "radius": 0.0,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": 99.0,
+            "radius_mm": 49.5,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": 28.0,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "none",
+            "count": null,
+            "pitch_circle_diameter_mm": null,
+            "angle_step_deg": null
+          },
+          "notes": [
+            "Through bore diameter 99mm"
+          ]
+        },
+        {
+          "name": "upper_counterbore",
+          "shape": "cylinder",
+          "operation": "cut",
+          "position": {
+            "xyz": [
+              0.0,
+              0.0,
+              19.0
+            ],
+            "polar": {
+              "radius": 0.0,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": 105.0,
+            "radius_mm": 52.5,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": 9.0,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "none",
+            "count": null,
+            "pitch_circle_diameter_mm": null,
+            "angle_step_deg": null
+          },
+          "notes": [
+            "Counterbore or step at top"
+          ]
+        },
+        {
+          "name": "lower_step",
+          "shape": "cylinder",
+          "operation": "add",
+          "position": {
+            "xyz": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "polar": {
+              "radius": 0.0,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": 115.0,
+            "radius_mm": 57.5,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": 17.0,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "none",
+            "count": null,
+            "pitch_circle_diameter_mm": null,
+            "angle_step_deg": null
+          },
+          "notes": [
+            "Intermediate diameter step"
+          ]
+        },
+        {
+          "name": "top_edge_fillet",
+          "shape": "fillet",
+          "operation": "add",
+          "position": {
+            "xyz": [
+              64.5,
+              0.0,
+              28.0
+            ],
+            "polar": {
+              "radius": 64.5,
+              "angle_deg": 0.0,
+              "reference": "global_origin"
+            }
+          },
+          "dimensions": {
+            "diameter_mm": null,
+            "radius_mm": 2.0,
+            "length_mm": null,
+            "width_mm": null,
+            "height_mm": null,
+            "thickness_mm": null,
+            "depth_mm": null
+          },
+          "pattern": {
+            "type": "none",
+            "count": null,
+            "pitch_circle_diameter_mm": null,
+            "angle_step_deg": null
+          },
+          "notes": [
+            "R2.00 fillet on outer top edge"
+          ]
+        }
+      ],
+      "dimensions": [
+        "Ø139.00 - outer diameter",
+        "Ø115.00 - intermediate diameter / bolt circle",
+        "Ø105.00 - counterbore diameter",
+        "Ø99.00 - central bore diameter",
+        "129.00 - width dimension at top",
+        "28.00 - total height",
+        "11.00 - upper section height",
+        "9.00 - lower step height",
+        "R2.00 - edge fillet radius"
+      ],
+      "notes": [
+        "Ra1.6 surface finish on upper face with 0.1 flatness to datum A",
+        "Ra6.3 surface finish on step face with 0.25 flatness to datum A",
+        "Ra1.6 surface finish on bore with 0.1 cylindricity to datum A",
+        "Datum A on bottom face",
+        "Hatching indicates solid material in section"
+      ]
+    }
+  ],
+  "global_constraints": [
+    "Part is axisymmetric about central axis",
+    "Datum A is the bottom flat face",
+    "All diameters are concentric to central axis",
+    "12 M6 holes equally spaced on PCD 115mm"
+  ],
+  "modeling_sequence": [
+    "1. Create base cylinder Ø139mm x 28mm height",
+    "2. Cut central through bore Ø99mm",
+    "3. Create stepped profile - cut outer material to Ø115mm for lower 17mm",
+    "4. Cut counterbore Ø105mm x 9mm depth from top",
+    "5. Add R2.00 fillet on outer top edge",
+    "6. Create 12x M6 threaded holes on PCD 115mm, equally spaced at 30° intervals",
+    "7. Apply surface finishes as specified"
+  ],
+  "uncertainties": [
+    "Exact depth of M6 threaded holes not specified - assumed through or blind",
+    "Thread specification for M6 (pitch, depth of thread) not fully detailed",
+    "Exact position of 129.00 dimension reference unclear",
+    "Whether the lower step at Ø115 is a raised boss or the base diameter is uncertain",
+    "Relationship between 9.00 and 11.00 dimensions needs verification - total should equal less than 28mm with middle section"
+  ]
+}
