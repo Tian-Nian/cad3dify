@@ -1,8 +1,10 @@
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from string import Template
 
@@ -49,8 +51,16 @@ def _analysis_parts_dir(workspace_dir: Path, generated: bool = False) -> Path:
     return workspace_dir / ("analysis.generated.parts" if generated else "analysis.parts")
 
 
+def _normalized_contract_file(workspace_dir: Path, generated: bool = False) -> Path:
+    return workspace_dir / ("normalized_contract.generated.json" if generated else "normalized_contract.json")
+
+
 def _feedback_file(workspace_dir: Path) -> Path:
     return workspace_dir / "refine_feedback.txt"
+
+
+def _chain_logs_dir(workspace_dir: Path) -> Path:
+    return workspace_dir / "chain_logs"
 
 
 def _analysis_report_file(workspace_dir: Path) -> Path:
@@ -205,16 +215,130 @@ def _blocking_analysis_issues(issues: list[str]) -> list[str]:
     return [issue for issue in issues if issue not in NON_BLOCKING_ANALYSIS_ISSUES]
 
 
+def _sanitize_chain_value(value):
+    if isinstance(value, ImageData):
+        return {
+            "kind": "ImageData",
+            "media_type": value.media_type,
+            "bytes": len(value.data or ""),
+        }
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _sanitize_chain_value(inner) for key, inner in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_chain_value(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _next_chain_log_index(workspace_dir: Path) -> int:
+    logs_dir = _chain_logs_dir(workspace_dir)
+    if not logs_dir.exists():
+        return 1
+    indices: list[int] = []
+    for path in logs_dir.glob("*.md"):
+        match = re.match(r"(\d+)_", path.name)
+        if match:
+            indices.append(int(match.group(1)))
+    return (max(indices) + 1) if indices else 1
+
+
+def _save_chain_interaction(
+    workspace_dir: Path,
+    interaction_name: str,
+    inputs,
+    raw_text: str | None,
+    parsed_result=None,
+    error: Exception | None = None,
+) -> Path:
+    logs_dir = _chain_logs_dir(workspace_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    index = _next_chain_log_index(workspace_dir)
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", interaction_name).strip("_") or "chain"
+    log_path = logs_dir / f"{index:04d}_{safe_name}.md"
+
+    sanitized_inputs = _sanitize_chain_value(inputs)
+    sections = [
+        f"# {interaction_name}",
+        "",
+        "## Inputs",
+        "```json",
+        json.dumps(sanitized_inputs, ensure_ascii=False, indent=2),
+        "```",
+    ]
+
+    if raw_text is not None:
+        sections.extend(["", "## Raw Output", "```text", str(raw_text), "```"])
+
+    if parsed_result is not None:
+        if isinstance(parsed_result, str):
+            sections.extend(["", "## Parsed Result", "```text", parsed_result, "```"])
+        else:
+            sections.extend([
+                "",
+                "## Parsed Result",
+                "```json",
+                json.dumps(_sanitize_chain_value(parsed_result), ensure_ascii=False, indent=2),
+                "```",
+            ])
+
+    if error is not None:
+        sections.extend(["", "## Error", "```text", repr(error), "```"])
+
+    log_path.write_text("\n".join(sections) + "\n", encoding="utf-8")
+    return log_path
+
+
+def _invoke_chain_and_record(
+    workspace_dir: Path,
+    chain,
+    inputs,
+    interaction_name: str,
+):
+    try:
+        outputs = chain.invoke(inputs)
+    except Exception as exc:
+        _save_chain_interaction(
+            workspace_dir=workspace_dir,
+            interaction_name=interaction_name,
+            inputs=inputs,
+            raw_text=None,
+            parsed_result=None,
+            error=exc,
+        )
+        raise
+
+    _save_chain_interaction(
+        workspace_dir=workspace_dir,
+        interaction_name=interaction_name,
+        inputs=inputs,
+        raw_text=outputs.get("text"),
+        parsed_result=outputs.get("result"),
+    )
+    return outputs
+
+
 def _invoke_analysis_json_chain_with_retries(
+    workspace_dir: Path,
     chain,
     inputs: dict,
     description: str,
     max_attempts: int = 3,
+    raise_on_exhausted_error: bool = False,
 ) -> dict | None:
     last_error: Exception | None = None
+    saw_invalid_json = False
     for attempt in range(max_attempts):
         try:
-            result = chain.invoke(inputs)["result"]
+            outputs = _invoke_chain_and_record(
+                workspace_dir=workspace_dir,
+                chain=chain,
+                inputs=inputs,
+                interaction_name=f"{description} attempt {attempt + 1}",
+            )
+            result = outputs.get("result")
         except Exception as exc:  # pragma: no cover - exercised through pipeline tests via mocks
             last_error = exc
             logger.warning(
@@ -224,11 +348,22 @@ def _invoke_analysis_json_chain_with_retries(
                 max_attempts,
                 exc,
             )
+            if attempt < max_attempts - 1:
+                base_delay = float(os.getenv("CAD3DIFY_ANALYSIS_RETRY_BASE_DELAY_SECONDS", "2"))
+                max_delay = float(os.getenv("CAD3DIFY_ANALYSIS_RETRY_MAX_DELAY_SECONDS", "12"))
+                delay = min(max_delay, base_delay * (2**attempt))
+                logger.info(
+                    "{} retrying after {:.1f}s backoff.",
+                    description,
+                    delay,
+                )
+                time.sleep(delay)
             continue
 
         if result:
             return result
 
+        saw_invalid_json = True
         logger.warning(
             "{} returned no valid JSON on attempt {}/{}.",
             description,
@@ -238,6 +373,10 @@ def _invoke_analysis_json_chain_with_retries(
 
     if last_error is not None:
         logger.warning("{} exhausted retries after repeated upstream/model errors.", description)
+        if raise_on_exhausted_error and not saw_invalid_json:
+            raise RuntimeError(
+                f"{description} exhausted retries after repeated upstream/model errors: {last_error}"
+            ) from last_error
     return None
 
 
@@ -273,6 +412,24 @@ def _has_required_views(payload: dict) -> bool:
 
 
 def _merge_analysis_with_fallback(primary: dict, fallback: dict) -> dict:
+    def _as_list(value) -> list:
+        if isinstance(value, list):
+            return value
+        if value is None:
+            return []
+        return [value]
+
+    def _dedupe_sequence(items: list) -> list:
+        deduped: list = []
+        seen: set[str] = set()
+        for item in items:
+            key = json.dumps(_sanitize_chain_value(item), ensure_ascii=False, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
     if not primary.get("drawing_summary"):
         primary["drawing_summary"] = fallback.get("drawing_summary", {})
     if not primary.get("section_interpretation"):
@@ -305,12 +462,10 @@ def _merge_analysis_with_fallback(primary: dict, fallback: dict) -> dict:
     if not primary.get("modeling_sequence"):
         primary["modeling_sequence"] = fallback.get("modeling_sequence", [])
 
-    primary_uncertainties = primary.get("uncertainties", [])
-    fallback_uncertainties = fallback.get("uncertainties", [])
+    primary_uncertainties = _as_list(primary.get("uncertainties", []))
+    fallback_uncertainties = _as_list(fallback.get("uncertainties", []))
     if fallback_uncertainties:
-        primary["uncertainties"] = primary_uncertainties + [
-            item for item in fallback_uncertainties if item not in primary_uncertainties
-        ]
+        primary["uncertainties"] = _dedupe_sequence(primary_uncertainties + fallback_uncertainties)
     return primary
 
 
@@ -349,6 +504,7 @@ def _write_analysis_parts(parts_dir: Path, payload: dict) -> None:
     views_dir = parts_dir / "views"
     views_dir.mkdir(parents=True, exist_ok=True)
 
+    _write_json(parts_dir / "normalized_contract.json", build_contract(payload))
     _write_json(parts_dir / "drawing_summary.json", payload.get("drawing_summary", {}))
     _write_json(parts_dir / "section_interpretation.json", payload.get("section_interpretation", {}))
     _write_json(parts_dir / "global_constraints.json", {"global_constraints": payload.get("global_constraints", [])})
@@ -430,12 +586,14 @@ def _force_output_filepath(code: str, output_path: Path) -> str:
 def _write_agent_analysis_payload(workspace_path: Path, payload: dict) -> None:
     payload = normalize_analysis_payload(payload)
     _write_json(_analysis_file(workspace_path, generated=True), payload)
+    _write_json(_normalized_contract_file(workspace_path, generated=True), build_contract(payload))
     _write_analysis_parts(_analysis_parts_dir(workspace_path, generated=True), payload)
 
 
 def _write_review_analysis_payload(workspace_path: Path, payload: dict) -> None:
     payload = normalize_analysis_payload(payload)
     _write_json(_analysis_file(workspace_path, generated=False), payload)
+    _write_json(_normalized_contract_file(workspace_path, generated=False), build_contract(payload))
     _write_analysis_parts(_analysis_parts_dir(workspace_path, generated=False), payload)
 
 
@@ -456,12 +614,17 @@ def _repair_analysis_until_aligned(
             max_attempts,
             len(blocking_issues),
         )
+        issue_inputs = blocking_issues[:]
+        structured_issue_guidance = _analysis_issue_guidance(blocking_issues)
+        if structured_issue_guidance:
+            issue_inputs.append(structured_issue_guidance)
         chain = CadAnalysisRefinerChain(model_type=metadata["model_type"])
         repaired = _invoke_analysis_json_chain_with_retries(
-            chain,
-            {
+            workspace_dir=workspace_path,
+            chain=chain,
+            inputs={
                 "analysis_json": _analysis_documents_text_from_payload(payload),
-                "issues": blocking_issues,
+                "issues": issue_inputs,
             },
             description="Analysis alignment refiner",
         )
@@ -474,8 +637,9 @@ def _repair_analysis_until_aligned(
 
         image_data = ImageData.load_from_file(metadata["source_image"])
         supplemented = _invoke_analysis_json_chain_with_retries(
-            CadDrawingAnalyzerChain(model_type=metadata["model_type"]),
-            {"input": image_data, "review_issues": blocking_issues},
+            workspace_dir=workspace_path,
+            chain=CadDrawingAnalyzerChain(model_type=metadata["model_type"]),
+            inputs={"input": image_data, "review_issues": issue_inputs},
             description="Fallback full-drawing analysis",
         )
         if supplemented:
@@ -484,6 +648,41 @@ def _repair_analysis_until_aligned(
         blocking_issues = _blocking_analysis_issues(issues)
         attempt += 1
     return payload
+
+
+def _ensure_analysis_aligned(
+    workspace_path: Path,
+    metadata: dict,
+    payload: dict,
+    *,
+    persist: bool = True,
+) -> dict:
+    aligned_payload = normalize_analysis_payload(payload)
+    analysis_issues = validate_analysis_payload(aligned_payload)
+    if _blocking_analysis_issues(analysis_issues):
+        aligned_payload = _repair_analysis_until_aligned(
+            workspace_path=workspace_path,
+            metadata=metadata,
+            initial_payload=aligned_payload,
+        )
+        analysis_issues = validate_analysis_payload(aligned_payload)
+
+    if persist:
+        _write_agent_analysis_payload(workspace_path, aligned_payload)
+        _write_review_analysis_payload(workspace_path, aligned_payload)
+        _analysis_report_file(workspace_path).write_text(
+            format_analysis_report(aligned_payload),
+            encoding="utf-8",
+        )
+
+    if _blocking_analysis_issues(analysis_issues):
+        logger.warning("Analysis JSON has alignment issues; see report at {}", _analysis_report_file(workspace_path))
+        raise ValueError(
+            "Analysis JSON still failed alignment checks after automatic repair. See report: "
+            f"{_analysis_report_file(workspace_path)}"
+        )
+
+    return aligned_payload
 
 
 def _persist_code_version(workspace_path: Path, version: int, code: str, analysis_payload: dict) -> Path:
@@ -533,6 +732,7 @@ def _refine_code_from_feedback(
     chain = CadCodeRefinerChain(model_type=metadata["model_type"])
     analysis_documents = _analysis_documents_text(workspace_path)
     result = _invoke_refiner_chain_with_retries(
+        workspace_path=workspace_path,
         chain=chain,
         analysis_documents=analysis_documents,
         code=current_code,
@@ -550,6 +750,7 @@ def _refine_code_from_feedback(
 
 
 def _invoke_refiner_chain_with_retries(
+    workspace_path: Path,
     chain: CadCodeRefinerChain,
     analysis_documents: str,
     code: str,
@@ -558,13 +759,17 @@ def _invoke_refiner_chain_with_retries(
 ) -> str | None:
     retry_feedback = feedback.strip()
     for attempt in range(max_attempts):
-        result = chain.invoke(
-            {
+        outputs = _invoke_chain_and_record(
+            workspace_dir=workspace_path,
+            chain=chain,
+            inputs={
                 "analysis_json": analysis_documents,
                 "code": code,
                 "feedback": retry_feedback,
-            }
-        )["result"]
+            },
+            interaction_name=f"Cad code refiner attempt {attempt + 1}",
+        )
+        result = outputs.get("result")
         if result:
             return result
         logger.warning("Refiner returned no parsable code block on attempt {}.", attempt + 1)
@@ -641,102 +846,24 @@ def run_analysis_stage(workspace_dir: str) -> Path:
     workspace_path = Path(workspace_dir).expanduser().resolve()
     metadata = _load_metadata(workspace_path)
     image_data = ImageData.load_from_file(metadata["source_image"])
-    scopes = [
-        (
-            "summary",
-            "{\n  \"drawing_summary\": {\n    \"title\": \"\",\n    \"description\": \"\",\n    \"unit\": \"mm\",\n    \"assumptions\": []\n  },\n  \"section_interpretation\": {\n    \"hatched_regions_are_solid\": true,\n    \"unhatched_regions_are_void\": true,\n    \"datum_or_reference_face\": \"bottom|top|centerline|unknown\",\n    \"notes\": []\n  }\n}",
-            "Extract only the drawing summary and the section interpretation. Record the key rule for this drawing: which visible areas are solid, which enclosed areas are void, and which face acts as the datum/reference for axial layering.",
-        ),
-        (
-            "top_view",
-            "{\n  \"name\": \"top_view\",\n  \"view_type\": \"top\",\n  \"summary\": \"\",\n  \"contour_stack\": [\n    {\n      \"order\": 1,\n      \"diameter\": null,\n      \"role\": \"outer_silhouette|visible_opening|recess_boundary|pattern_reference|hidden_only\",\n      \"material_state\": \"solid_boundary|void|transition|reference_only|unknown\",\n      \"visible_on_face\": \"top_face|recess_floor|internal_floor|lower_step_face|bottom_face|unknown\",\n      \"appearance_reason\": \"direct_edge_on_current_face|seen_through_upper_opening|hidden_only|unknown\",\n      \"owned_by_section_band\": \"\",\n      \"evidence\": \"\"\n    }\n  ],\n  \"entities\": [],\n  \"dimensions\": [],\n  \"cross_view_mapping\": [\n    {\n      \"top_contour_order\": 1,\n      \"section_band_id\": \"\",\n      \"section_face\": \"top_face|recess_floor|internal_floor|lower_step_face|bottom_face|unknown\",\n      \"relationship\": \"same_edge|opening_to_band|edge_of_visible_floor|hole_on_visible_floor|hidden_bore|unknown\"\n    }\n  ],\n  \"notes\": []\n}",
-            "Extract only the top view. Enumerate the visible contour stack in `contour_stack` and preserve outside-to-inside ordering wherever it matters. For each contour, explicitly state which physical face owns that contour and why it is visible. Encode each contour or pattern as geometry such as outer silhouette, visible opening, recess boundary, reference pattern, or hidden deeper feature inferred from section. Keep reference dimensions like pitch circles separate from material boundaries. Use stable semantic ids when possible, but prefer geometric meaning over guessed part-family names. For each hole, cut, recess, boss, or repeated feature, include material_state, axial_extent, feature_placement, evidence, and the face on which it is visible. If multiple depth levels are visible in the same plan view, keep them as separate owned contours instead of flattening them into one plane. Preserve relative size, containment, symmetry, concentricity, and adjacency relationships even when some dimensions are not explicit. Top-view output must be sufficient to reconstruct the plan-view footprint without guessing. If the part is a bracket/support/prismatic body, the true top view must contain the full base footprint. A standing plate view with a circular bore shown in true shape is usually an elevation rather than the plan view; do not mislabel it as `top_view`.",
-        ),
-        (
-            "section_view",
-            "{\n  \"name\": \"section_A-A\",\n  \"view_type\": \"section\",\n  \"summary\": \"\",\n  \"axial_bands\": [\n    {\n      \"band_id\": \"\",\n      \"band_role\": \"top_rim|upper_opening|internal_floor|middle_bore|lower_bore|solid_wall|unknown\",\n      \"axial_start\": null,\n      \"axial_end\": null,\n      \"outer_diameter\": null,\n      \"inner_diameter\": null,\n      \"annular_region\": \"solid|void|mixed|unknown\",\n      \"top_visibility\": \"visible_from_above|not_visible_from_above|hidden_but_dimensionally_required|unknown\",\n      \"evidence\": \"\"\n    }\n  ],\n  \"entities\": [],\n  \"dimensions\": [],\n  \"cross_view_mapping\": [],\n  \"notes\": []\n}",
-            "Extract only the main section view. Decompose the cross-section into axial bands from datum face to opposite face in `axial_bands`. For each band, state the outer boundary, inner boundary, whether the region is solid, void, or mixed, and whether that band creates edges visible from other views. Explicitly capture where every cut feature starts, whether a face is recessed, and whether any silhouette-only chamfer, relief, or round exists. If the section dimensions an R-value at a transition, encode it as a fillet feature with exact radius and adjoining geometry; do not simplify it into a step or label it a chamfer. Do not claim the section directly shows holes or slots unless the cutting plane intersects them. If the section misses a repeated feature axis, use the section for layer inference only. Preserve section-defined relative relationships such as wall thickness, offsets, coaxial steps, tangencies, and layer order. Section output must be sufficient to reconstruct the full profile without guessing and must explain which internal faces are visible through other openings. For bracket/support/prismatic parts, use the section to capture thickness/depth bands separately from the standing height axis, and keep any wider base footprint spans available for cross-view matching instead of collapsing them into the plate width.",
-        ),
-        (
-            "constraints",
-            "{\n  \"global_constraints\": [],\n  \"modeling_sequence\": [],\n  \"uncertainties\": []\n}",
-            "Extract only global constraints, modeling sequence, and uncertainties. Include explicit constraints that map top-view contour_stack items to section-view axial_bands, state separately whether each mapped region is kept material or removed material, call out any case where a contour is visible through another opening but belongs to a deeper face, and preserve any explicit R-radius transition as a real fillet requirement rather than allowing it to collapse into a step. Prefer relation constraints such as concentricity, symmetry, tangency, equal spacing, alignment, containment, and ordering when they are visually evident even if some dimensions are missing.",
-        ),
-    ]
-    scope_results = {}
-    for scope_name, schema_text, scope_instructions in scopes:
-        chain = CadDrawingScopedAnalyzerChain(
-            scope_name=scope_name,
-            schema_text=schema_text,
-            scope_instructions=scope_instructions,
-            model_type=metadata["model_type"],
-        )
-        result = _invoke_analysis_json_chain_with_retries(
-            chain,
-            image_data,
-            description=f"Scoped analysis for '{scope_name}'",
-        )
-        if not result:
-            logger.warning(
-                "Scoped analysis for '{}' returned no valid JSON. Falling back to broader analysis for missing data.",
-                scope_name,
-            )
-            continue
-        scope_results[scope_name] = result
-
-    summary_scope = scope_results.get("summary", {})
-    constraints_scope = scope_results.get("constraints", {})
-
-    result = {
-        "drawing_summary": summary_scope.get("drawing_summary", {}),
-        "section_interpretation": summary_scope.get("section_interpretation", {}),
-        "views": [
-            scope_results[scope_name]
-            for scope_name in ("top_view", "section_view")
-            if scope_name in scope_results
-        ],
-        "global_constraints": constraints_scope.get("global_constraints", []),
-        "modeling_sequence": constraints_scope.get("modeling_sequence", []),
-        "uncertainties": constraints_scope.get("uncertainties", []),
-    }
-
-    result = normalize_analysis_payload(result)
-    if not _has_required_views(result):
-        logger.warning("Scoped analysis did not yield required top/section views. Falling back to full-drawing analysis.")
-        fallback_result = _invoke_analysis_json_chain_with_retries(
-            CadDrawingAnalyzerChain(model_type=metadata["model_type"]),
-            image_data,
-            description="Initial full-drawing analysis fallback",
-        )
-        if fallback_result:
-            result = normalize_analysis_payload(_merge_analysis_with_fallback(result, fallback_result))
-
-    analysis_issues = validate_analysis_payload(result)
-    editable_result = result
-    if analysis_issues:
-        editable_result = _repair_analysis_until_aligned(workspace_path, metadata, result)
-        if not _has_required_views(editable_result):
-            fallback_result = _invoke_analysis_json_chain_with_retries(
-                CadDrawingAnalyzerChain(model_type=metadata["model_type"]),
-                image_data,
-                description="Post-repair full-drawing analysis fallback",
-            )
-            if fallback_result:
-                editable_result = normalize_analysis_payload(_merge_analysis_with_fallback(editable_result, fallback_result))
-        analysis_issues = validate_analysis_payload(editable_result)
+    chain = CadDrawingAnalyzerChain(model_type=metadata["model_type"])
+    result = _invoke_analysis_json_chain_with_retries(
+        workspace_dir=workspace_path,
+        chain=chain,
+        inputs={"input": image_data, "review_issues": ""},
+        description="Full drawing analysis",
+        raise_on_exhausted_error=True,
+    )
+    if not result:
+        raise ValueError("Drawing analysis failed: model response did not contain valid JSON.")
 
     generated_path = _analysis_file(workspace_path, generated=True)
     review_path = _analysis_file(workspace_path, generated=False)
-    _write_agent_analysis_payload(workspace_path, editable_result)
-    _write_review_analysis_payload(workspace_path, editable_result)
-    _analysis_report_file(workspace_path).write_text(format_analysis_report(editable_result), encoding="utf-8")
-
-    if _blocking_analysis_issues(analysis_issues):
-        logger.warning("Analysis JSON has alignment issues; see report at {}", _analysis_report_file(workspace_path))
-        raise ValueError(
-            "Analysis JSON still failed alignment checks after automatic repair. See report: "
-            f"{_analysis_report_file(workspace_path)}"
-        )
+    editable_result = _ensure_analysis_aligned(
+        workspace_path=workspace_path,
+        metadata=metadata,
+        payload=result,
+    )
 
     logger.info(f"Saved agent-managed analysis JSON to {generated_path}")
     logger.info(f"Review copy of analysis JSON is available at {review_path}")
@@ -756,8 +883,12 @@ def _repair_code_until_aligned(
     analysis_documents = _analysis_documents_text(workspace_path)
     while issues and attempt < max_attempts:
         feedback = "Validator mismatches to fix:\n" + "\n".join(f"- {issue}" for issue in issues)
+        static_guidance = _static_code_validation_guidance(issues)
+        if static_guidance:
+            feedback = f"{feedback}\n\n{static_guidance}"
         chain = CadCodeRefinerChain(model_type=metadata["model_type"])
         repaired = _invoke_refiner_chain_with_retries(
+            workspace_path=workspace_path,
             chain=chain,
             analysis_documents=analysis_documents,
             code=code,
@@ -812,6 +943,67 @@ def _execution_failure_guidance(log_content: str, current_code: str = "") -> str
     ])
 
 
+def _static_code_validation_guidance(issues: list[str]) -> str:
+    guidance: list[str] = []
+    joined = "\n".join(issues)
+
+    if "代码在全新 Workplane 上直接调用 cutBlind/cutThruAll" in joined:
+        guidance.append(
+            "- Rewrite subtractive operations so they start from the owning solid face on `result`, for example `result.faces(...).workplane()...cutBlind(...)`, or build an explicit cutter solid and subtract it from `result`. Do not cut from `cq.Workplane(...)` or `result.workplane(offset=...)` without first attaching to the real solid face."
+        )
+
+    if "代码把必需的内圆角放进 try/except 后静默跳过" in joined:
+        guidance.append(
+            "- Remove silent `try/except ... pass` fallbacks around required fillets. Rebuild the profile with an arc or use one deterministic selector strategy that keeps the required round in the final solid."
+        )
+
+    if not guidance:
+        return ""
+
+    return "\n".join([
+        "## Structured static repair guidance",
+        *guidance,
+    ])
+
+
+def _analysis_issue_guidance(issues: list[str]) -> str:
+    guidance: list[str] = []
+    joined = "\n".join(issues)
+
+    if "契约字段缺失" in joined:
+        guidance.append(
+            "- Recover missing contract fields from the existing views, entities, contour ordering, and axial bands when the drawing supports them. If the drawing still does not prove the value, keep the geometry relationship explicit and record the ambiguity in uncertainties instead of inventing a number."
+        )
+
+    if "顶视图缺少" in joined or "剖视图缺少" in joined:
+        guidance.append(
+            "- If a feature is clearly present in one view but missing in another relevant view, add the missing cross-view entity explicitly instead of leaving the relationship implicit in notes or constraints."
+        )
+
+    if "PCD" in joined or "pattern" in joined or "孔阵列" in joined:
+        guidance.append(
+            "- Keep pattern-reference dimensions separate from material-boundary dimensions. Repeated-feature reference geometry, owning support geometry, and seed-feature size must remain distinct unless the drawing explicitly equates them."
+        )
+
+    if "visible" in joined or "top_face" in joined or "起始面" in joined or "可见面" in joined:
+        guidance.append(
+            "- Keep visibility provenance separate from the true owning or start face. A feature seen through an opening or on a lower exposed floor should not be rewritten as if it originates on the outermost face."
+        )
+
+    if "不一致" in joined:
+        guidance.append(
+            "- Repair cross-view mismatches by preserving one consistent geometric meaning per dimension and per entity across all views, rather than copying one value into several different roles."
+        )
+
+    if not guidance:
+        return ""
+
+    return "\n".join([
+        "## Structured analysis repair guidance",
+        *guidance,
+    ])
+
+
 def run_generation_stage(workspace_dir: str) -> Path:
     workspace_path = Path(workspace_dir).expanduser().resolve()
     metadata = _load_metadata(workspace_path)
@@ -819,22 +1011,19 @@ def run_generation_stage(workspace_dir: str) -> Path:
         raise FileNotFoundError(f"Analysis JSON not found in {workspace_path}")
 
     chain = CadCodeFromJsonGeneratorChain(model_type=metadata["model_type"])
-    analysis_documents = _analysis_documents_text(workspace_path)
     analysis_payload = _load_agent_analysis_payload(workspace_path)
-    analysis_issues = validate_analysis_payload(analysis_payload)
-    if _blocking_analysis_issues(analysis_issues):
-        analysis_payload = _repair_analysis_until_aligned(workspace_path, metadata, analysis_payload)
-        analysis_issues = validate_analysis_payload(analysis_payload)
-        _write_agent_analysis_payload(workspace_path, analysis_payload)
-        _write_review_analysis_payload(workspace_path, analysis_payload)
-        analysis_documents = _analysis_documents_text(workspace_path)
-    _analysis_report_file(workspace_path).write_text(format_analysis_report(analysis_payload), encoding="utf-8")
-    if _blocking_analysis_issues(analysis_issues):
-        raise ValueError(
-            "Analysis JSON still failed alignment checks after automatic repair. See report: "
-            f"{_analysis_report_file(workspace_path)}"
-        )
-    result = chain.invoke({"analysis_json": analysis_documents})["result"]
+    analysis_payload = _ensure_analysis_aligned(
+        workspace_path=workspace_path,
+        metadata=metadata,
+        payload=analysis_payload,
+    )
+    analysis_documents = _analysis_documents_text(workspace_path)
+    result = _invoke_chain_and_record(
+        workspace_dir=workspace_path,
+        chain=chain,
+        inputs={"analysis_json": analysis_documents},
+        interaction_name="Cad code generator",
+    ).get("result")
     if not result:
         raise ValueError("CAD code generation failed: model response did not contain parsable code.")
 
@@ -860,11 +1049,11 @@ def run_execution_stage(workspace_dir: str, max_auto_repairs: int = 4, max_refin
         raise FileNotFoundError("No agent-generated model file found. Run generate-code first.")
     metadata = _load_metadata(workspace_path)
     analysis_payload = _load_agent_analysis_payload(workspace_path)
-    analysis_issues = validate_analysis_payload(analysis_payload)
-    if _blocking_analysis_issues(analysis_issues):
-        analysis_payload = _repair_analysis_until_aligned(workspace_path, metadata, analysis_payload)
-        _write_agent_analysis_payload(workspace_path, analysis_payload)
-        _write_review_analysis_payload(workspace_path, analysis_payload)
+    analysis_payload = _ensure_analysis_aligned(
+        workspace_path=workspace_path,
+        metadata=metadata,
+        payload=analysis_payload,
+    )
 
     attempt = 0
     refinement_cycle = 0
@@ -999,21 +1188,13 @@ def run_refinement_stage(workspace_dir: str) -> Path:
     if version is None:
         raise FileNotFoundError("No agent-generated model file found. Run generate-code first.")
 
-    analysis_documents = _analysis_documents_text(workspace_path)
     analysis_payload = _load_agent_analysis_payload(workspace_path)
-    analysis_issues = validate_analysis_payload(analysis_payload)
-    if _blocking_analysis_issues(analysis_issues):
-        analysis_payload = _repair_analysis_until_aligned(workspace_path, metadata, analysis_payload)
-        analysis_issues = validate_analysis_payload(analysis_payload)
-        _write_agent_analysis_payload(workspace_path, analysis_payload)
-        _write_review_analysis_payload(workspace_path, analysis_payload)
-        analysis_documents = _analysis_documents_text(workspace_path)
-    _analysis_report_file(workspace_path).write_text(format_analysis_report(analysis_payload), encoding="utf-8")
-    if _blocking_analysis_issues(analysis_issues):
-        raise ValueError(
-            "Analysis JSON still failed alignment checks after automatic repair. See report: "
-            f"{_analysis_report_file(workspace_path)}"
-        )
+    analysis_payload = _ensure_analysis_aligned(
+        workspace_path=workspace_path,
+        metadata=metadata,
+        payload=analysis_payload,
+    )
+    analysis_documents = _analysis_documents_text(workspace_path)
     current_code = _agent_model_file(workspace_path, version).read_text(encoding="utf-8")
     feedback = _feedback_file(workspace_path).read_text(encoding="utf-8") if _feedback_file(workspace_path).exists() else ""
     execution_log = _execution_log_file(workspace_path, version)

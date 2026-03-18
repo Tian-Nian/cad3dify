@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cad3dify.pipeline import _analysis_documents_text_from_payload, _execution_failure_guidance, _format_step_comparison_feedback, initialize_workflow, run_analysis_stage, run_execution_stage
+from cad3dify.pipeline import _analysis_documents_text_from_payload, _analysis_issue_guidance, _execution_failure_guidance, _format_step_comparison_feedback, _merge_analysis_with_fallback, _static_code_validation_guidance, initialize_workflow, run_analysis_stage, run_execution_stage, run_generation_stage
 
 
 class AnalysisDocumentsTextTests(unittest.TestCase):
@@ -79,11 +79,69 @@ class AnalysisDocumentsTextTests(unittest.TestCase):
         self.assertIn("## normalized_contract.json", text)
         self.assertIn('"recess_seat_diameter": 125.0', text)
 
+    def test_merge_analysis_with_fallback_dedupes_dict_uncertainties(self) -> None:
+        primary = {
+            "drawing_summary": {},
+            "section_interpretation": {},
+            "views": [],
+            "global_constraints": [],
+            "modeling_sequence": [],
+            "uncertainties": {"source": "primary", "note": "a"},
+        }
+        fallback = {
+            "drawing_summary": {},
+            "section_interpretation": {},
+            "views": [],
+            "global_constraints": [],
+            "modeling_sequence": [],
+            "uncertainties": [
+                {"source": "primary", "note": "a"},
+                {"source": "fallback", "note": "b"},
+            ],
+        }
+
+        merged = _merge_analysis_with_fallback(primary, fallback)
+
+        self.assertEqual(
+            merged["uncertainties"],
+            [
+                {"source": "primary", "note": "a"},
+                {"source": "fallback", "note": "b"},
+            ],
+        )
+
 
 class WorkflowAutomationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.project_root = Path(__file__).resolve().parents[1]
         self.sample_dir = self.project_root / "sample_data"
+
+    def test_static_code_validation_guidance_mentions_boolean_and_fillet_repairs(self) -> None:
+        guidance = _static_code_validation_guidance(
+            [
+                "代码在全新 Workplane 上直接调用 cutBlind/cutThruAll，CadQuery 没有可切削的 solid。",
+                "代码把必需的内圆角放进 try/except 后静默跳过，闭环执行风险过高。",
+            ]
+        )
+
+        self.assertIn("Structured static repair guidance", guidance)
+        self.assertIn("start from the owning solid face", guidance)
+        self.assertIn("Remove silent `try/except ... pass`", guidance)
+
+    def test_analysis_issue_guidance_summarizes_current_problem_types(self) -> None:
+        guidance = _analysis_issue_guidance(
+            [
+                "契约字段缺失: recess_seat_diameter。",
+                "顶视图缺少螺栓孔阵列实体。",
+                "孔阵列 PCD 被误写成凹台阶座面边界直径。",
+                "顶视已说明孔图元来自下层可见面，但剖视仍把孔起始面写成 top。",
+            ]
+        )
+
+        self.assertIn("Structured analysis repair guidance", guidance)
+        self.assertIn("Recover missing contract fields", guidance)
+        self.assertIn("pattern-reference dimensions separate from material-boundary dimensions", guidance)
+        self.assertIn("visibility provenance separate from the true owning or start face", guidance)
 
     def test_initialize_workflow_auto_detects_reference_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -330,7 +388,7 @@ class WorkflowAutomationTests(unittest.TestCase):
         self.assertIn("coordinate-frame or envelope-construction bug", feedback)
         self.assertIn("X=345.0 mm, Y=369.0 mm, Z=104.0 mm", feedback)
 
-    def test_run_analysis_stage_falls_back_when_scoped_sections_have_missing_json(self) -> None:
+    def test_run_analysis_stage_saves_full_analysis_and_normalized_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = initialize_workflow(
                 image_filepath=str(self.sample_dir / "test2.jpg"),
@@ -338,25 +396,7 @@ class WorkflowAutomationTests(unittest.TestCase):
                 model_type="custom",
             )
 
-            scoped_results = [
-                {
-                    "drawing_summary": {"title": "test2"},
-                    "section_interpretation": {"hatched_regions_are_solid": True},
-                },
-                {
-                    "name": "top_view",
-                    "view_type": "top",
-                    "summary": "top",
-                    "contour_stack": [],
-                    "entities": [],
-                    "dimensions": [],
-                    "cross_view_mapping": [],
-                    "notes": [],
-                },
-                None,
-                None,
-            ]
-            fallback_payload = {
+            analysis_payload = {
                 "drawing_summary": {"title": "fallback"},
                 "section_interpretation": {"hatched_regions_are_solid": True},
                 "views": [
@@ -386,24 +426,23 @@ class WorkflowAutomationTests(unittest.TestCase):
                 "uncertainties": [],
             }
 
-            with patch("cad3dify.pipeline.CadDrawingScopedAnalyzerChain") as scoped_chain_cls, patch(
-                "cad3dify.pipeline.CadDrawingAnalyzerChain"
-            ) as fallback_chain_cls, patch(
+            with patch("cad3dify.pipeline.CadDrawingAnalyzerChain") as analyzer_chain_cls, patch(
                 "cad3dify.pipeline.validate_analysis_payload", return_value=[]
             ):
-                scoped_chain_cls.return_value.invoke.side_effect = [{"result": payload} for payload in scoped_results]
-                fallback_chain_cls.return_value.invoke.return_value = {"result": fallback_payload}
+                analyzer_chain_cls.return_value.invoke.return_value = {"result": analysis_payload}
 
                 result_path = run_analysis_stage(str(workspace))
 
             payload = json.loads(result_path.read_text(encoding="utf-8"))
+            normalized_contract = json.loads((workspace / "normalized_contract.json").read_text(encoding="utf-8"))
 
             self.assertEqual(result_path, workspace / "analysis.json")
             self.assertEqual(len(payload["views"]), 2)
             self.assertTrue(any(view.get("view_type") == "top" for view in payload["views"]))
             self.assertTrue(any(view.get("view_type") == "section" for view in payload["views"]))
+            self.assertIsInstance(normalized_contract, dict)
 
-    def test_run_analysis_stage_raises_before_generation_when_blocking_issues_remain(self) -> None:
+    def test_run_analysis_stage_repairs_blocking_issues_before_returning(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = initialize_workflow(
                 image_filepath=str(self.sample_dir / "test2.jpg"),
@@ -411,55 +450,117 @@ class WorkflowAutomationTests(unittest.TestCase):
                 model_type="custom",
             )
 
-            scoped_results = [
-                {
-                    "drawing_summary": {"title": "test2"},
-                    "section_interpretation": {"hatched_regions_are_solid": True},
-                },
-                {
-                    "name": "top_view",
-                    "view_type": "top",
-                    "summary": "top",
-                    "contour_stack": [],
-                    "entities": [],
-                    "dimensions": [],
-                    "cross_view_mapping": [],
-                    "notes": [],
-                },
-                {
-                    "name": "section_A-A",
-                    "view_type": "section",
-                    "summary": "section",
-                    "axial_bands": [],
-                    "entities": [],
-                    "dimensions": [],
-                    "cross_view_mapping": [],
-                    "notes": [],
-                },
-                {
-                    "global_constraints": [],
-                    "modeling_sequence": [],
-                    "uncertainties": [],
-                },
-            ]
+            analysis_payload = {
+                "drawing_summary": {"title": "test2"},
+                "section_interpretation": {"hatched_regions_are_solid": True},
+                "views": [
+                    {
+                        "name": "top_view",
+                        "view_type": "top",
+                        "summary": "top",
+                        "contour_stack": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                    {
+                        "name": "section_A-A",
+                        "view_type": "section",
+                        "summary": "section",
+                        "axial_bands": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                ],
+                "global_constraints": [],
+                "modeling_sequence": [],
+                "uncertainties": [],
+            }
 
-            with patch("cad3dify.pipeline.CadDrawingScopedAnalyzerChain") as scoped_chain_cls, patch(
+            repaired_payload = dict(analysis_payload)
+            repaired_payload["uncertainties"] = ["repaired"]
+
+            with patch("cad3dify.pipeline.CadDrawingAnalyzerChain") as analyzer_chain_cls, patch(
                 "cad3dify.pipeline.validate_analysis_payload",
-                return_value=["契约字段缺失: outer_diameter_body。"],
+                side_effect=[
+                    ["契约字段缺失: outer_diameter_body。"],
+                    [],
+                ],
             ), patch(
                 "cad3dify.pipeline._repair_analysis_until_aligned",
-                side_effect=lambda workspace_path, metadata, result: result,
+                return_value=repaired_payload,
+            ) as repair_mock, patch(
+                "cad3dify.pipeline.format_analysis_report",
+                return_value="# Analysis Alignment Report\n\n## Issues\n- repaired\n",
+            ):
+                analyzer_chain_cls.return_value.invoke.return_value = {"result": analysis_payload}
+                result_path = run_analysis_stage(str(workspace))
+
+            self.assertEqual(result_path, workspace / "analysis.json")
+            self.assertEqual(json.loads(result_path.read_text(encoding="utf-8"))["uncertainties"], ["repaired"])
+            repair_mock.assert_called_once()
+
+    def test_run_analysis_stage_raises_after_automatic_repair_if_blocking_issues_remain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = initialize_workflow(
+                image_filepath=str(self.sample_dir / "test2.jpg"),
+                workspace_dir=tmpdir,
+                model_type="custom",
+            )
+
+            analysis_payload = {
+                "drawing_summary": {"title": "test2"},
+                "section_interpretation": {"hatched_regions_are_solid": True},
+                "views": [
+                    {
+                        "name": "top_view",
+                        "view_type": "top",
+                        "summary": "top",
+                        "contour_stack": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                    {
+                        "name": "section_A-A",
+                        "view_type": "section",
+                        "summary": "section",
+                        "axial_bands": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                ],
+                "global_constraints": [],
+                "modeling_sequence": [],
+                "uncertainties": [],
+            }
+
+            with patch("cad3dify.pipeline.CadDrawingAnalyzerChain") as analyzer_chain_cls, patch(
+                "cad3dify.pipeline.validate_analysis_payload",
+                side_effect=[
+                    ["契约字段缺失: outer_diameter_body。"],
+                    ["契约字段缺失: outer_diameter_body。"],
+                ],
+            ), patch(
+                "cad3dify.pipeline._repair_analysis_until_aligned",
+                return_value=analysis_payload,
             ), patch(
                 "cad3dify.pipeline.format_analysis_report",
                 return_value="# Analysis Alignment Report\n\n## Issues\n- 契约字段缺失: outer_diameter_body。\n",
             ):
-                scoped_chain_cls.return_value.invoke.side_effect = [{"result": payload} for payload in scoped_results]
+                analyzer_chain_cls.return_value.invoke.return_value = {"result": analysis_payload}
                 with self.assertRaises(ValueError) as exc_info:
                     run_analysis_stage(str(workspace))
 
-            self.assertIn("Analysis JSON still failed alignment checks", str(exc_info.exception))
+            self.assertIn("Analysis JSON still failed alignment checks after automatic repair", str(exc_info.exception))
 
-    def test_run_analysis_stage_retries_after_transient_scoped_timeout(self) -> None:
+    def test_run_analysis_stage_retries_after_transient_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = initialize_workflow(
                 image_filepath=str(self.sample_dir / "test2.jpg"),
@@ -467,45 +568,43 @@ class WorkflowAutomationTests(unittest.TestCase):
                 model_type="custom",
             )
 
-            scoped_results = [
-                {
-                    "drawing_summary": {"title": "test2"},
-                    "section_interpretation": {"hatched_regions_are_solid": True},
-                },
-                {
-                    "name": "top_view",
-                    "view_type": "top",
-                    "summary": "top",
-                    "contour_stack": [],
-                    "entities": [],
-                    "dimensions": [],
-                    "cross_view_mapping": [],
-                    "notes": [],
-                },
-                {
-                    "name": "section_A-A",
-                    "view_type": "section",
-                    "summary": "section",
-                    "axial_bands": [],
-                    "entities": [],
-                    "dimensions": [],
-                    "cross_view_mapping": [],
-                    "notes": [],
-                },
-                {
-                    "global_constraints": [],
-                    "modeling_sequence": [],
-                    "uncertainties": [],
-                },
-            ]
+            analysis_payload = {
+                "drawing_summary": {"title": "test2"},
+                "section_interpretation": {"hatched_regions_are_solid": True},
+                "views": [
+                    {
+                        "name": "top_view",
+                        "view_type": "top",
+                        "summary": "top",
+                        "contour_stack": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                    {
+                        "name": "section_A-A",
+                        "view_type": "section",
+                        "summary": "section",
+                        "axial_bands": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                ],
+                "global_constraints": [],
+                "modeling_sequence": [],
+                "uncertainties": [],
+            }
 
-            with patch("cad3dify.pipeline.CadDrawingScopedAnalyzerChain") as scoped_chain_cls, patch(
+            with patch("cad3dify.pipeline.CadDrawingAnalyzerChain") as analyzer_chain_cls, patch(
                 "cad3dify.pipeline.validate_analysis_payload",
                 return_value=[],
             ):
-                scoped_chain_cls.return_value.invoke.side_effect = [
+                analyzer_chain_cls.return_value.invoke.side_effect = [
                     RuntimeError("524 timeout"),
-                    *({"result": payload} for payload in scoped_results),
+                    {"result": analysis_payload},
                 ]
 
                 result_path = run_analysis_stage(str(workspace))
@@ -516,6 +615,126 @@ class WorkflowAutomationTests(unittest.TestCase):
             self.assertEqual(payload["drawing_summary"]["title"], "test2")
             self.assertTrue(any(view.get("view_type") == "top" for view in payload["views"]))
             self.assertTrue(any(view.get("view_type") == "section" for view in payload["views"]))
+
+    def test_run_analysis_stage_surfaces_exhausted_upstream_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = initialize_workflow(
+                image_filepath=str(self.sample_dir / "test2.jpg"),
+                workspace_dir=tmpdir,
+                model_type="custom",
+            )
+
+            with patch("cad3dify.pipeline.CadDrawingAnalyzerChain") as analyzer_chain_cls, patch(
+                "cad3dify.pipeline.time.sleep"
+            ) as sleep_mock:
+                analyzer_chain_cls.return_value.invoke.side_effect = [
+                    RuntimeError("429 rate limit"),
+                    RuntimeError("429 rate limit"),
+                    RuntimeError("524 timeout"),
+                ]
+
+                with self.assertRaises(RuntimeError) as exc_info:
+                    run_analysis_stage(str(workspace))
+
+            self.assertIn("Full drawing analysis exhausted retries after repeated upstream/model errors", str(exc_info.exception))
+            self.assertIn("524 timeout", str(exc_info.exception))
+            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [2.0, 4.0])
+
+    def test_run_generation_stage_repairs_analysis_before_generating_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = initialize_workflow(
+                image_filepath=str(self.sample_dir / "test2.jpg"),
+                workspace_dir=tmpdir,
+                model_type="custom",
+            )
+
+            invalid_payload = {
+                "drawing_summary": {"title": "test2"},
+                "section_interpretation": {"hatched_regions_are_solid": True},
+                "views": [
+                    {"name": "top_view", "view_type": "top", "summary": "top", "contour_stack": [], "entities": [], "dimensions": [], "cross_view_mapping": [], "notes": []},
+                    {"name": "section_A-A", "view_type": "section", "summary": "section", "axial_bands": [], "entities": [], "dimensions": [], "cross_view_mapping": [], "notes": []},
+                ],
+                "global_constraints": [],
+                "modeling_sequence": [],
+                "uncertainties": [],
+            }
+            (workspace / "analysis.generated.json").write_text(json.dumps(invalid_payload), encoding="utf-8")
+
+            repaired_payload = dict(invalid_payload)
+            repaired_payload["uncertainties"] = ["aligned"]
+
+            generated_code = 'from pathlib import Path\nPath("output.step").write_text("ok", encoding="utf-8")\n'
+
+            with patch("cad3dify.pipeline._ensure_analysis_aligned", return_value=repaired_payload) as ensure_mock, patch(
+                "cad3dify.pipeline.CadCodeFromJsonGeneratorChain"
+            ) as generator_chain_cls, patch(
+                "cad3dify.pipeline.validate_generated_code",
+                return_value=[],
+            ):
+                generator_chain_cls.return_value.invoke.return_value = {"result": generated_code, "text": generated_code}
+
+                result_path = run_generation_stage(str(workspace))
+
+            self.assertTrue(result_path.exists())
+            ensure_mock.assert_called_once()
+
+    def test_run_analysis_stage_saves_chain_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = initialize_workflow(
+                image_filepath=str(self.sample_dir / "test2.jpg"),
+                workspace_dir=tmpdir,
+                model_type="custom",
+            )
+
+            analysis_payload = {
+                "drawing_summary": {"title": "test2"},
+                "section_interpretation": {"hatched_regions_are_solid": True},
+                "views": [
+                    {
+                        "name": "top_view",
+                        "view_type": "top",
+                        "summary": "top",
+                        "contour_stack": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                    {
+                        "name": "section_A-A",
+                        "view_type": "section",
+                        "summary": "section",
+                        "axial_bands": [],
+                        "entities": [],
+                        "dimensions": [],
+                        "cross_view_mapping": [],
+                        "notes": [],
+                    },
+                ],
+                "global_constraints": [],
+                "modeling_sequence": [],
+                "uncertainties": [],
+            }
+
+            with patch("cad3dify.pipeline.CadDrawingAnalyzerChain") as analyzer_chain_cls, patch(
+                "cad3dify.pipeline.validate_analysis_payload",
+                return_value=[],
+            ):
+                analyzer_chain_cls.return_value.invoke.return_value = {
+                    "result": analysis_payload,
+                    "text": json.dumps(analysis_payload, ensure_ascii=False),
+                }
+
+                run_analysis_stage(str(workspace))
+
+            logs_dir = workspace / "chain_logs"
+            log_files = sorted(logs_dir.glob("*.md"))
+
+            self.assertTrue(log_files)
+            first_log = log_files[0].read_text(encoding="utf-8")
+            self.assertIn("## Inputs", first_log)
+            self.assertIn("## Parsed Result", first_log)
 
 
 if __name__ == "__main__":

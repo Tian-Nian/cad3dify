@@ -44,6 +44,19 @@ _COMMON_ANALYSIS_RULES = (
 )
 
 
+_REPEATED_FEATURE_OUTPUT_RULES = (
+    "Repeated-feature output contract:\n"
+    "1. If the drawing shows a repeated feature array such as holes, slots, bosses, pockets, or similar repeated geometry, emit an explicit entity for that array rather than leaving it only in prose, notes, or global constraints.\n"
+    "2. Each repeated-feature entity must carry the repetition rule fields that are actually supported by the drawing, such as count/quantity, pitch-circle diameter, linear pitch, angular step, symmetry, or seed feature size.\n"
+    "3. Keep placement-reference dimensions separate from material-boundary dimensions. A pattern-reference diameter, pitch circle, spacing guide, or symmetry guide is not automatically an opening, boss diameter, recess boundary, or wall boundary.\n"
+    "4. If a repeated feature is visible from one face but starts from another proven face or layer, encode `visible_on_face` and `feature_placement.start_face` separately instead of collapsing them into one fact.\n"
+    "5. If a section, elevation, or detail view exists, represent the owning layer, support face, or support band for the repeated feature even when the cutting plane does not slice through every repeated instance directly.\n"
+    "6. If a repeated feature is supported by a recessed floor, annular seat, pocket floor, side wall, or intermediate step, emit that supporting geometry as its own entity instead of merging it into the repeated feature.\n"
+    "7. If validator issues mention a missing repeated-feature entity, missing quantity, missing start face, or confusion between reference dimensions and material boundaries, treat those as blocking and repair them explicitly before returning JSON.\n"
+    "8. For repeated circular hole arrays, prefer the stable ids `bolt_hole_pattern` in the top view and `bolt_holes` in the section view because downstream normalization recognizes those names.\n"
+)
+
+
 def _extract_json_object(text: str) -> dict[str, Any] | None:
     fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     candidates = [fenced_match.group(1) if fenced_match else None, text]
@@ -71,6 +84,7 @@ class CadDrawingAnalyzerChain(SequentialChain):
     def __init__(self, model_type: MODEL_TYPE = "gpt") -> None:
         analyze_prompt = (
             f"{_COMMON_ANALYSIS_RULES}"
+            f"{_REPEATED_FEATURE_OUTPUT_RULES}"
             "If validator issues are provided, treat them as missing-or-inconsistent information you must explicitly repair in the returned JSON.\n"
             "Return a complete structured JSON specification for the whole drawing.\n"
             "Use this JSON structure:\n"
@@ -106,6 +120,8 @@ class CadDrawingAnalyzerChain(SequentialChain):
             '      ],\n'
             '      "entities": [\n'
             "        {{\n"
+            '          "id": "outer_profile|central_bore|bolt_hole_pattern|hole_pattern_1",\n'
+            '          "type": "revolved_profile|through_hole|counterbore|annular_recess|annular_floor|hole_pattern|fillet|chamfer|slot_array|boss|unknown",\n'
             '          "name": "主体",\n'
             '          "shape": "",\n'
             '          "operation": "add|cut|unknown",\n'
@@ -152,6 +168,18 @@ class CadDrawingAnalyzerChain(SequentialChain):
             '          "notes": []\n'
             "        }}\n"
             "      ],\n"
+            '      "axial_bands": [\n'
+            "        {{\n"
+            '          "band_id": "",\n'
+            '          "band_role": "top_rim|upper_flange|middle_body|lower_flange|upper_opening|lower_bore|solid_wall|unknown",\n'
+            '          "axial_start": null,\n'
+            '          "axial_end": null,\n'
+            '          "outer_diameter": null,\n'
+            '          "inner_diameter": null,\n'
+            '          "material_state": "solid|void|mixed|unknown",\n'
+            '          "notes": []\n'
+            "        }}\n"
+            "      ],\n"
             '      "dimensions": [],\n'
             '      "cross_view_mapping": [\n'
             "        {{\n"
@@ -176,10 +204,16 @@ class CadDrawingAnalyzerChain(SequentialChain):
             "For every patterned hole, explicitly fill `evidence`. If the section view does not clearly support top-face placement, do not assign `start_face=top`.\n"
             "For section views, add notes that explain which contours are solid because of hatching and which enclosed contours are void because they are not hatched.\n"
             "For section views, explicitly break the geometry into axial bands/layers and state for each band whether the annular region between OD and ID is solid or void.\n"
-            "If a bolt-hole ring lies in a lower flange rather than the top flange, encode that in `feature_placement.target_layer` and `feature_placement.start_face`.\n"
-            "If a bolt-hole ring is visible in top view on a lower exposed floor, keep two facts at once: `visible_on_face` is that lower exposed face, while `feature_placement.start_face` is the real drilling face from section.\n"
+            "If a repeated cut or repeated boss lies in a lower flange, intermediate step, internal floor, or side wall rather than the outermost face, encode that in `feature_placement.target_layer` and `feature_placement.start_face`.\n"
+            "If a repeated feature is visible in top view on a lower exposed floor, keep two facts at once: `visible_on_face` is that lower exposed face, while `feature_placement.start_face` is the true owning or drilling face inferred from section evidence.\n"
+            "When a repeated feature array exists, the JSON is incomplete unless the relevant views and ownership layers are both represented.\n"
+            "If only one view directly shows a repeated feature array, the other relevant view must still contain a matching entity inferred from cross-view reasoning rather than omitting it.\n"
+            "Do not return a repeated feature array only as a contour, only as a note, or only inside `global_constraints`; it must be an entity with explicit repetition fields.\n"
+            "If the drawing gives a repeated-feature count like 4x, 6x, or 12x, put that numeric value into the repeated-feature entity even if the individual instances are not all dimensioned separately.\n"
             "If the top view shows a large visible opening and the section shows a smaller deeper through bore, represent them as separate entities instead of merging them into one visible circle.\n"
-            "If the holes sit on a recessed annular seat, use `start_face=upper_step` or `lower_step` as appropriate rather than `top` or `bottom`.\n"
+            "If a repeated feature sits on a recessed annular seat, pocket floor, or intermediate step, use the appropriate owning face such as `upper_step`, `lower_step`, or another explicit support face rather than defaulting to `top` or `bottom`.\n"
+            "If a repeated feature sits on a supporting floor or seat, also emit that supporting geometry with its own boundary dimensions. Do not substitute a pattern reference diameter for the support boundary diameter.\n"
+            "Keep these dimensions distinct whenever the drawing supports them: outer envelope, internal opening, support boundary, repeated-feature reference dimension, and seed feature size.\n"
             "If the top view contains circles from multiple Z levels, the JSON must keep them as separate contours with explicit face ownership rather than flattening them into one top plane.\n"
             "If the section silhouette shows a bottom chamfer, include an explicit chamfer entity and mention any missing size in `uncertainties`.\n"
             "If the drawing shows a rounded R transition between levels, do not replace it with a stepped corner in the JSON or modeling sequence.\n"
@@ -324,10 +358,16 @@ class CadAnalysisRefinerChain(SequentialChain):
     def __init__(self, model_type: MODEL_TYPE = "gpt") -> None:
         refine_analysis_prompt = (
             f"{_COMMON_ANALYSIS_RULES}"
+            f"{_REPEATED_FEATURE_OUTPUT_RULES}"
             "You are repairing an analysis JSON so downstream CAD generation can run as a closed loop without manual edits.\n"
             "There is no human-edited fallback file in the loop. Your corrected JSON becomes the next source of truth for generation.\n"
             "Fix every listed validator issue while preserving explicit dimensions, cross-view mappings, and section semantics.\n"
             "Do not delete valid geometry just to silence an issue. Preserve explicit R callouts as real fillet features.\n"
+            "Use the validator issues as the problem list for this specific drawing. Repair only the geometry relationships that the issues actually expose, instead of rewriting the JSON around one guessed part family.\n"
+            "If the issues mention a missing repeated feature entity or missing quantity, add or repair an explicit repeated-feature entity rather than writing only notes or constraints.\n"
+            "If the issues show that a reference dimension was confused with a material boundary, separate those concepts and restore the owning support geometry.\n"
+            "If the issues show a visibility-face versus start-face mismatch, preserve both facts instead of collapsing them into one field.\n"
+            "If one field remains ambiguous after repair, keep the entity and record the ambiguity in `uncertainties`; do not drop the entity.\n"
             "Return the full corrected JSON only.\n"
             "## Current Analysis JSON\n"
             "```json\n"

@@ -437,6 +437,76 @@ class ValidateAnalysisPayloadTests(unittest.TestCase):
 
         self.assertNotIn("顶视可见上开口直径与剖视上台阶孔直径不一致。", issues)
 
+    def test_build_contract_accepts_recess_seat_aliases_from_upper_recess_and_top_contours(self) -> None:
+        payload = {
+            "drawing_summary": {},
+            "section_interpretation": {},
+            "global_constraints": [],
+            "modeling_sequence": [],
+            "uncertainties": [],
+            "views": [
+                {
+                    "name": "top_view",
+                    "view_type": "top",
+                    "contour_stack": [
+                        {"order": 1, "role": "outer_silhouette", "diameter": 139.0},
+                        {"order": 2, "role": "pattern_reference", "diameter": 129.0},
+                        {"order": 3, "role": "recess_seat_outer_boundary", "diameter": 115.0},
+                        {"order": 4, "role": "recess_seat_inner_boundary", "diameter": 105.0},
+                        {"order": 5, "role": "visible_opening", "diameter": 99.0},
+                    ],
+                    "entities": [
+                        {"id": "bolt_hole_pattern", "type": "hole_pattern", "count": 12, "bolt_circle_diameter": 129.0, "visible_on_face": "recess_floor"},
+                        {"id": "central_bore", "type": "through_hole", "diameter": 99.0, "visible_on_face": "recess_floor"},
+                    ],
+                    "dimensions": [
+                        {"label": "outer_diameter_flange", "value": 139.0},
+                        {"label": "inner_diameter_bore", "value": 99.0},
+                    ],
+                },
+                {
+                    "name": "section_A-A",
+                    "view_type": "section",
+                    "axial_bands": [
+                        {"band_id": "lower_flange", "band_role": "lower_flange", "axial_start": 0, "axial_end": 9, "outer_diameter": 139.0, "inner_diameter": 99.0},
+                        {"band_id": "middle_body", "band_role": "middle_body", "axial_start": 9, "axial_end": 17, "outer_diameter": 115.0, "inner_diameter": 99.0},
+                        {"band_id": "upper_rim", "band_role": "top_rim", "axial_start": 17, "axial_end": 28, "outer_diameter": 139.0, "inner_diameter": 139.0},
+                    ],
+                    "entities": [
+                        {
+                            "id": "upper_recess",
+                            "type": "annular_recess",
+                            "floor_z": 17.0,
+                            "dimensions": {
+                                "upper_opening_diameter_mm": 139.0,
+                                "seat_outer_diameter_mm": 115.0,
+                                "seat_inner_diameter_mm": 105.0,
+                                "depth_mm": 11.0,
+                            },
+                        },
+                        {"id": "bolt_holes", "type": "hole_pattern", "count": 12, "bolt_circle_diameter": 129.0, "start_face": "recess_floor", "axial_layer": "upper_flange_solid"},
+                        {"id": "central_bore", "type": "through_hole", "diameter": 99.0},
+                    ],
+                    "dimensions": [
+                        {"label": "outer_diameter_flange", "value": 139.0},
+                        {"label": "outer_diameter_body", "value": 115.0},
+                        {"label": "inner_diameter_bore", "value": 99.0},
+                        {"label": "total_height", "value": 28.0},
+                        {"label": "lower_flange_height", "value": 9.0},
+                        {"label": "middle_body_height", "value": 8.0},
+                        {"label": "upper_flange_height", "value": 11.0},
+                    ],
+                },
+            ],
+        }
+
+        contract = build_contract(payload)
+        issues = validate_analysis_payload(payload)
+
+        self.assertEqual(contract["recess_seat_diameter"], 115.0)
+        self.assertEqual(contract["upper_opening_diameter"], 139.0)
+        self.assertNotIn("契约字段缺失: recess_seat_diameter。", issues)
+
     def test_pattern_reference_pcd_and_upper_step_visibility_constraints(self) -> None:
         payload = {
             "drawing_summary": {},
@@ -635,6 +705,72 @@ exporters.export(result, \"out.step\")
         issues = validate_generated_code(code, payload)
 
         self.assertIn("代码在全新 Workplane 上直接调用 cutBlind/cutThruAll，CadQuery 没有可切削的 solid。", issues)
+
+    def test_validate_generated_code_does_not_false_positive_on_face_attached_cut(self) -> None:
+        payload = {
+            "drawing_summary": {},
+            "section_interpretation": {},
+            "global_constraints": [],
+            "modeling_sequence": [],
+            "uncertainties": [],
+            "views": [
+                {
+                    "name": "top_view",
+                    "view_type": "top",
+                    "contour_stack": [{"order": 1, "role": "outer_silhouette", "diameter": 10.0}],
+                    "entities": [
+                        {"id": "upper_opening", "type": "circle", "diameter": 8.0},
+                        {"id": "central_bore", "type": "circle", "diameter": 4.0},
+                    ],
+                    "dimensions": [
+                        {"label": "outer_diameter_flange", "value": 10.0},
+                        {"label": "inner_diameter_upper", "value": 8.0},
+                        {"label": "inner_diameter_bore", "value": 4.0},
+                    ],
+                },
+                {
+                    "name": "section_A-A",
+                    "view_type": "section",
+                    "axial_bands": [
+                        {"band_id": "lower_flange", "band_role": "lower_flange", "axial_start": 0.0, "axial_end": 2.0, "outer_diameter": 10.0, "inner_diameter": 4.0},
+                        {"band_id": "middle_body", "band_role": "middle_body", "axial_start": 2.0, "axial_end": 4.0, "outer_diameter": 8.0, "inner_diameter": 4.0},
+                        {"band_id": "upper_rim", "band_role": "top_rim", "axial_start": 4.0, "axial_end": 6.0, "outer_diameter": 10.0, "inner_diameter": 8.0},
+                    ],
+                    "entities": [
+                        {"id": "central_bore", "type": "through_hole", "diameter": 4.0},
+                    ],
+                    "dimensions": [
+                        {"label": "outer_diameter_flange", "value": 10.0},
+                        {"label": "outer_diameter_body", "value": 8.0},
+                        {"label": "inner_diameter_upper", "value": 8.0},
+                        {"label": "inner_diameter_bore", "value": 4.0},
+                        {"label": "recess_seat_diameter", "value": 8.0},
+                        {"label": "total_height", "value": 6.0},
+                        {"label": "lower_flange_height", "value": 2.0},
+                        {"label": "middle_body_height", "value": 2.0},
+                        {"label": "upper_flange_height", "value": 2.0},
+                    ],
+                },
+            ],
+        }
+        code = """
+import cadquery as cq
+from cadquery import exporters
+
+result = cq.Workplane(\"XY\").box(10, 10, 6)
+result = (
+    result
+    .faces(\">Z\")
+    .workplane()
+    .circle(2)
+    .cutBlind(-2)
+)
+exporters.export(result, \"out.step\")
+"""
+
+        issues = validate_generated_code(code, payload)
+
+        self.assertNotIn("代码在全新 Workplane 上直接调用 cutBlind/cutThruAll，CadQuery 没有可切削的 solid。", issues)
 
     def test_validate_generated_code_flags_unsupported_loftcombine_keyword(self) -> None:
         payload = {

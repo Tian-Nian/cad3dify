@@ -84,7 +84,7 @@ class ChatModelParameters(BaseModel):
                 provider="openai_compatible",
                 model_name=os.getenv("CUSTOM_OPENAI_MODEL", ""),
                 temperature=temperature,
-                max_tokens=int(os.getenv("CUSTOM_OPENAI_MAX_TOKENS", "4096")),
+                max_tokens=int(os.getenv("CUSTOM_OPENAI_MAX_TOKENS", "32000")),
                 base_url=os.getenv("CUSTOM_OPENAI_BASE_URL"),
                 api_key=os.getenv("CUSTOM_OPENAI_API_KEY"),
                 request_timeout=float(os.getenv("CUSTOM_OPENAI_REQUEST_TIMEOUT", "180")),

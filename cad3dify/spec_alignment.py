@@ -193,6 +193,14 @@ def _find_contour(view: dict[str, Any] | None, *, order: int | None = None, role
     return None
 
 
+def _find_first_contour_by_roles(view: dict[str, Any] | None, *roles: str) -> dict[str, Any] | None:
+    for role in roles:
+        contour = _find_contour(view, role=role)
+        if contour is not None:
+            return contour
+    return None
+
+
 def _view_contains_linear_measure(view: dict[str, Any] | None, target: float | int | None, tolerance: float = 1e-6) -> bool:
     if not view or not isinstance(target, (int, float)):
         return False
@@ -501,12 +509,16 @@ def build_contract(payload: dict[str, Any]) -> dict[str, Any]:
     central_bore_top = _as_dict(_find_entity(top_view, "central_bore") or _find_entity_by_type(top_view, "bore", "through_hole"))
     central_bore_section = _as_dict(_find_entity(section_view, "central_bore") or _find_entity_by_type(section_view, "through_bore", "through_hole"))
     upper_opening = _as_dict(_find_entity(top_view, "upper_opening"))
-    recessed_hole_seat = _as_dict(_find_entity(section_view, "recessed_hole_seat") or _find_entity(section_view, "upper_recess"))
+    upper_recess = _as_dict(_find_entity(section_view, "upper_recess") or _find_entity_by_type(section_view, "annular_recess"))
+    recessed_hole_seat = _as_dict(_find_entity(section_view, "recessed_hole_seat") or upper_recess)
     fillet_inner = _as_dict(_find_entity(section_view, "fillet_inner") or _find_entity(section_view, "fillet_inner_step"))
     top_outer_contour = _find_contour(top_view, order=1, role="outer_silhouette")
     top_pattern_reference = _find_contour(top_view, role="pattern_reference")
     top_visible_openings = [entity for entity in _find_entities_by_type(top_view, "bore") if entity.get("visible_on_face") in {"recess_floor", "internal_floor"}]
-    top_recess_boundary = _find_contour(top_view, role="recess_boundary")
+    top_recess_boundary = _find_first_contour_by_roles(top_view, "recess_boundary", "recess_seat_outer_boundary")
+    top_recess_inner_boundary = _find_first_contour_by_roles(top_view, "recess_seat_inner_boundary", "visible_opening")
+    upper_recess_dimensions = _as_dict(_dict_get(upper_recess, "dimensions")) or {}
+    normalized_contract = _as_dict(payload.get("normalized_contract")) or {}
     section_bands = section_view.get("axial_bands", []) if section_view else []
     numeric_band_starts = [float(band.get("axial_start")) for band in section_bands if _numeric_value(band.get("axial_start")) is not None]
     numeric_band_ends = [float(band.get("axial_end")) for band in section_bands if _numeric_value(band.get("axial_end")) is not None]
@@ -618,8 +630,13 @@ def build_contract(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "recess_seat_diameter": _first_numeric(
             recessed_hole_seat.get("outer_diameter") if recessed_hole_seat else None,
+            upper_recess.get("outer_diameter") if upper_recess else None,
+            upper_recess_dimensions.get("seat_outer_diameter_mm"),
+            normalized_contract.get("recess_seat_outer_diameter"),
             _find_section_dimension_any(section_view, "recess_seat_diameter"),
             recessed_hole_seat.get("inner_diameter") if recessed_hole_seat else None,
+            upper_recess.get("inner_diameter") if upper_recess else None,
+            upper_recess_dimensions.get("seat_inner_diameter_mm"),
             top_recess_boundary.get("diameter") if top_recess_boundary else None,
         ),
         "total_height": total_height,
@@ -638,13 +655,15 @@ def build_contract(payload: dict[str, Any]) -> dict[str, Any]:
         "upper_opening_diameter": _first_numeric(
             _find_dimension_by_label(top_view, "inner_diameter_upper", "upper_opening_diameter"),
             _dict_get(upper_opening, "diameter"),
+            upper_recess_dimensions.get("upper_opening_diameter_mm"),
             _dict_get(central_bore_top, "outer_diameter"),
             _dict_get(top_visible_openings[0] if top_visible_openings else None, "outer_diameter"),
+            top_recess_inner_boundary.get("diameter") if top_recess_inner_boundary else None,
             _dict_get(_find_contour(top_view, order=4), "diameter"),
         ),
         "recess_floor_z": _first_numeric(
             _dict_get(recessed_hole_seat, "z_level"),
-            _dict_get(_find_entity(section_view, "upper_recess"), "floor_z"),
+            _dict_get(upper_recess, "floor_z"),
             middle_band.get("axial_end") if middle_band else None,
         ),
         "lower_bore_step_z": _first_numeric(
@@ -911,21 +930,74 @@ def _contains_number(code_numbers: set[float], expected: float | int | None) -> 
     return any(math.isclose(value, expected_value, rel_tol=0.0, abs_tol=1e-6) for value in code_numbers)
 
 
+def _is_cq_workplane_constructor(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return func.value.id == "cq" and func.attr == "Workplane"
+    return isinstance(func, ast.Name) and func.id == "Workplane"
+
+
+def _call_chain_methods(node: ast.AST) -> tuple[list[str], ast.AST | None]:
+    methods: list[str] = []
+    current = node
+    while isinstance(current, ast.Call):
+        if _is_cq_workplane_constructor(current):
+            return methods, current
+        func = current.func
+        if isinstance(func, ast.Attribute):
+            methods.append(func.attr)
+            current = func.value
+            continue
+        break
+    return methods, current
+
+
+def _has_standalone_boolean_cut(tree: ast.AST) -> bool:
+    solid_builders = {
+        "box",
+        "extrude",
+        "revolve",
+        "loft",
+        "sweep",
+        "twistExtrude",
+        "union",
+        "add",
+        "cut",
+        "intersect",
+        "shell",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr not in {"cutBlind", "cutThruAll"}:
+            continue
+        methods, root = _call_chain_methods(node)
+        if not _is_cq_workplane_constructor(root):
+            continue
+        intermediate_methods = set(methods[1:])
+        if intermediate_methods.isdisjoint(solid_builders):
+            return True
+    return False
+
+
 def validate_generated_code(code: str, payload: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     contract = build_contract(payload)
     geometry_family = contract.get("geometry_family", "axisymmetric")
     code_numbers = _collect_numeric_constants(code)
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        tree = ast.parse("")
     section_view = _find_view(payload, "section")
     section_fillet = _as_dict(_find_entity(section_view, "fillet_inner") or _find_entity(section_view, "fillet_inner_step"))
     has_profile_round = any(token in code for token in ("threePointArc(", "radiusArc(", "sagittaArc("))
     defined_tags = set(re.findall(r'\.tag\(\s*["\']([^"\']+)["\']\s*\)', code))
     referenced_tags = set(re.findall(r'workplaneFromTagged\(\s*["\']([^"\']+)["\']\s*\)', code))
-    standalone_boolean_cut = re.search(
-        r'cq\.Workplane\("[^"]+"(?:\s*,[^\)]*)?\)(?:(?!exporters\.export).)*\.workplane\([^\)]*\)(?:(?!exporters\.export).)*\.(?:circle|rect|slot2D|pushPoints)\([^\)]*\)(?:(?!exporters\.export).)*\.(cutBlind|cutThruAll)\(',
-        code,
-        re.DOTALL,
-    )
+    standalone_boolean_cut = _has_standalone_boolean_cut(tree)
     unsupported_loftcombine = re.search(r'\.loft\([^\)]*\bloftCombine\s*=', code)
 
     def has_number(expected: float | int | None) -> bool:
