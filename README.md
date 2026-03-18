@@ -56,6 +56,22 @@ export CUSTOM_OPENAI_MAX_TOKENS="4096"
 python scripts/cli.py start sample_data/g1-3.jpg --workspace_dir runs/case1 --model_type custom
 ```
 
+Inspect a STEP or STP file and summarize its geometric envelope, face/edge types, and orthographic view composition.
+
+```bash
+python scripts/inspect_step.py sample_data/test.stp
+python scripts/inspect_step.py sample_data/test.stp --compare_to sample_data/test2.stp
+python scripts/inspect_step.py sample_data/test.stp --export_views_dir runs/test_views --output runs/test_views/summary.json
+```
+
+The inspector returns JSON with:
+
+- overall bounding-box size and volume
+- face and edge type counts
+- circular-edge statistics grouped by projection plane
+- top/front/right orthographic summaries
+- optional diffs against a reference STEP file
+
 ## Architecture
 
 ```mermaid

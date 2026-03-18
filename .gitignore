@@ -1,2 +1,4 @@
 __pycache__
 .env
+runs/
+agent_workspaces/

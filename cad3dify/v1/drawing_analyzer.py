@@ -15,34 +15,32 @@ _COMMON_ANALYSIS_RULES = (
     "The JSON will be reviewed and edited by a human, then used as the source of truth for later CAD code generation.\n"
     "Use millimeters for dimensions when the drawing implies mm. Keep uncertain values in an `uncertainties` array instead of inventing data.\n"
     "Critical interpretation rules:\n"
-    "1. In section views, hatched regions represent solid material. Non-hatched enclosed regions represent voids, holes, grooves, bores, or removed material.\n"
-    "2. Use the section view to determine which axial layer or face a cut feature starts from.\n"
-    "3. Never default a patterned hole to the top face unless the section view positively supports that.\n"
-    "4. When section A-A shows narrow unhatched vertical slots near the outer rim, determine their vertical span and map them to the matching flange layer.\n"
-    "5. If the section view does not prove the axial layer, mark it unknown and explain the ambiguity briefly.\n"
-    "6. In top views, distinguish visible openings from deeper hidden bores. Do not label a deeper bore as a visible top-view circle unless the drawing actually shows it.\n"
-    "7. If a patterned hole opens from a recessed annular seat or step face, record that recessed start face explicitly instead of collapsing it to top or bottom.\n"
-    "8. If the section shows a bottom chamfer, lower-edge relief, or other silhouette-only outer-edge feature, capture it as a separate chamfer or edge feature even when its exact size is uncertain.\n"
-    "9. In top views, enumerate the visible concentric contours from outside to inside in order, and decide for each contour whether it is an outer silhouette, a visible opening, a recess boundary, or a hidden deeper feature inferred only from the section.\n"
-    "10. In section views, decompose the part into axial bands or layers from datum face to opposite face. For every band, explicitly state outer boundary, inner boundary, and whether the annular region is solid or void.\n"
-    "11. For every top-view hole pattern, recess ring, and visible circle, map it to the matching section layer, start face, or axial band. Do not leave the top/section correspondence implicit.\n"
+    "1. In section views, hatched regions represent solid material. Non-hatched enclosed regions represent voids, holes, grooves, bores, pockets, or removed material.\n"
+    "2. Decompose the drawing into geometric primitives and relationships, not named part families. Focus on contours, openings, holes, slots, pockets, bosses, steps, fillets, chamfers, and their relative placement.\n"
+    "3. For every meaningful entity, record relative position, local size, and ownership by a physical face or layer. If an absolute value is not dimensioned, keep the relation explicit instead of inventing a number.\n"
+    "4. Use section views to determine axial layering, start faces, and keep-vs-cut semantics. If the section view does not prove the axial layer, mark it unknown and explain the ambiguity briefly.\n"
+    "5. Never default a patterned hole, slot, or recess to the top face unless the section view positively supports that.\n"
+    "6. In top views, distinguish visible openings from deeper hidden bores or cavities. Do not label a deeper feature as a visible top-view contour unless the drawing actually shows it.\n"
+    "7. A contour visible in one view may belong to a lower internal face seen through an opening. Visibility does not imply the contour lies on the outermost face.\n"
+    "8. For every visible contour, record both why it is visible and which physical face owns it. Treat visibility provenance as geometry, not as a side note.\n"
+    "9. In top/front/side views, enumerate the visible contour stack from outside to inside or from one side to the other whenever that ordering matters for reconstruction.\n"
+    "10. In section views, decompose the part into axial bands or layers from datum face to opposite face. For every band, explicitly state outer boundary, inner boundary, and whether the enclosed region is solid, void, or mixed.\n"
+    "11. Map each visible contour, hole pattern, recess ring, or profile transition to the matching section band, face, or layer. Do not leave cross-view correspondence implicit.\n"
     "12. For every enclosed region that matters to modeling, explicitly decide whether material is kept or removed. Never leave keep-vs-cut implicit in prose.\n"
-    "13. Do not claim that a section view shows hole slots or drilled voids unless the cutting plane actually intersects the hole axes or the drawing explicitly depicts the holes in section. If the section misses the hole axes, use it only for layer inference, not direct hole shape evidence.\n"
-    "14. Do not reuse a section diameter as a hole pitch-circle diameter unless the drawing explicitly dimensions the hole PCD. Visible contour diameters, recess diameters, and hole PCD are different concepts and must stay separate.\n"
-    "15. A contour visible in the top view may belong to a lower internal face seen through an upper opening. Visibility from above does not mean the contour lies on the topmost face.\n"
-    "16. For every visible top-view contour, record both why it is visible and which physical face owns it: top face, recessed floor, internal floor, lower step face, or another face.\n"
-    "17. Distinguish these concepts explicitly whenever they appear: outer top rim, upper opening edge, lower exposed floor outer edge, lower exposed floor inner opening, and hole pattern visible on that lower floor.\n"
-    "18. If a hole pattern is visible in top view through an upper opening but the section shows the cylinders start on a lower face, encode the visibility face and the true start face separately. Never collapse them into a top-face hole.\n"
-    "19. A visible top-view circle can be an edge on a lower exposed face, not just a cut on the top face. Treat visibility provenance as part of the geometry, not as a note.\n"
-    "20. Before finishing, check whether the top view mixes edges from multiple Z levels. If yes, keep those Z levels separate in JSON instead of flattening them into one plane.\n"
-    "21. Use standardized names whenever the feature exists so downstream alignment stays stable: top-view ids `bolt_hole_pattern`, `central_bore`, `upper_opening`, `top_recess`; section-view ids `bolt_holes`, `central_bore`, `recessed_hole_seat`, `bottom_outer_chamfer`, `fillet_inner`; dimension labels `outer_diameter_flange`, `outer_diameter_body`, `inner_diameter_upper`, `inner_diameter_bore`, `recess_seat_diameter`, `total_height`, `lower_flange_height`, `middle_body_height`, `upper_flange_height`, `bolt_circle_diameter`.\n"
-    "22. Never use an upper opening diameter, recess diameter, or body diameter as the bolt-circle diameter unless the drawing explicitly dimensions the hole center circle that way. In this drawing family, PCD belongs to hole centers only.\n"
-    "23. If the hole center radius lies inside a larger visible top opening, those holes cannot belong to the outer top rim. They must belong to a lower visible face seen through that opening, or remain unknown if the drawing is ambiguous.\n"
-    "24. Never infer an external outer-diameter step from an internal opening diameter. A diameter attached to an internal void or recess edge is not an outer profile diameter unless the section silhouette clearly shows an external vertical step at that diameter.\n"
-    "25. If the drawing uses an R callout such as R2.00 on a profile transition, encode it as a fillet/round with explicit radius and explicit adjoining faces. Do not silently convert an explicit radius callout into a sharp step or a chamfer.\n"
-    "26. Distinguish fillet/round from chamfer explicitly. An R-prefixed callout is a fillet unless the drawing explicitly labels a chamfer, bevel, or C-value.\n"
-    "27. A rounded transition shown in section may connect two Z levels without creating an extra top-view contour. Preserve the round in section geometry and modeling instructions without inventing extra top-view circles.\n"
-    "28. Keep the JSON compact and modeling-oriented. Avoid repeated prose.\n"
+    "13. Do not claim that a section view directly shows a hole, slot, or drilled void unless the cutting plane intersects that feature or the drawing explicitly depicts it in section. Otherwise use the section only for layer inference.\n"
+    "14. Keep contour diameters, profile widths, feature sizes, and pattern reference dimensions as separate concepts unless the drawing explicitly equates them. A reference pattern diameter is not automatically a material boundary.\n"
+    "15. If the drawing shows repeated features, capture both the repeated feature geometry and the repetition rule: count, spacing, pitch circle, angular step, linear pitch, symmetry, or mirror relation.\n"
+    "16. If a feature is visible in one view but starts from another face according to section evidence, encode the visibility face and the true start face separately.\n"
+    "17. If the drawing uses an R callout on a profile transition, encode it as a fillet/round with explicit radius and adjoining geometry. Do not silently convert an explicit radius callout into a sharp step or chamfer.\n"
+    "18. Distinguish fillet/round from chamfer explicitly. An R-prefixed callout is a fillet unless the drawing explicitly labels a chamfer, bevel, or C-value.\n"
+    "19. A rounded transition shown in section may connect two layers without creating an extra contour in another view. Preserve the round in section geometry and modeling instructions without inventing extra visible edges.\n"
+    "20. If a view mixes edges from multiple depth or Z levels, keep those levels separate in JSON instead of flattening them into one plane.\n"
+    "21. Use stable semantic ids when the role is clear, such as `outer_profile`, `central_bore`, `hole_pattern_1`, `slot_array_1`, `recess_1`, `fillet_1`, or `chamfer_1`. Use generic numbered ids when the role is unclear.\n"
+    "22. Use dimension labels tied to geometric meaning, not to guessed part families. Prefer labels like `overall_width`, `overall_height`, `overall_depth`, `outer_diameter`, `inner_diameter`, `pattern_pitch_circle_diameter`, `slot_width`, `wall_thickness`, `step_height`, or similarly specific semantic names when the drawing supports them.\n"
+    "23. When dimensions are missing, preserve order, containment, adjacency, symmetry, tangency, concentricity, and alignment relationships explicitly so downstream modeling can still reconstruct the geometry.\n"
+    "24. Keep the JSON compact and modeling-oriented. Avoid repeated prose.\n"
+    "25. Determine `view_type` from projection semantics, not from sheet position. Do not call a front or side elevation `top` just because it is drawn above another view.\n"
+    "26. For prismatic/support/bracket parts, explicitly capture the three global envelope axes. The true top view must describe the full plan-view footprint, while the section/elevation views must capture standing height and thickness/depth. If a view shows the full standing height together with a circular bore in true shape, that view is usually an elevation, not the plan view.\n"
 )
 
 
@@ -73,6 +71,7 @@ class CadDrawingAnalyzerChain(SequentialChain):
     def __init__(self, model_type: MODEL_TYPE = "gpt") -> None:
         analyze_prompt = (
             f"{_COMMON_ANALYSIS_RULES}"
+            "If validator issues are provided, treat them as missing-or-inconsistent information you must explicitly repair in the returned JSON.\n"
             "Return a complete structured JSON specification for the whole drawing.\n"
             "Use this JSON structure:\n"
             "{{\n"
@@ -185,6 +184,7 @@ class CadDrawingAnalyzerChain(SequentialChain):
             "If the section silhouette shows a bottom chamfer, include an explicit chamfer entity and mention any missing size in `uncertainties`.\n"
             "If the drawing shows a rounded R transition between levels, do not replace it with a stepped corner in the JSON or modeling sequence.\n"
             "Make the JSON self-consistent across views: matching diameters, matching hole counts, matching PCDs, and matching axial interpretations.\n"
+            "For support brackets, pillow blocks, or other prismatic parts, do not collapse the model into a single upright plate. Make sure the JSON contains the full base footprint dimensions and the thickness/depth axis separately from the standing height axis.\n"
             "Before finishing, verify that the top-view contours and section-view bands together fully determine what is solid and what is removed.\n"
             "Never say the section directly shows a hole void unless the cutting plane intersects that hole pattern. If the section only provides indirect evidence for the hole layer, say so explicitly.\n"
             "Never collapse visible contour diameters, recess diameters, and hole PCD into one number unless the drawing explicitly says they are equal.\n"
@@ -192,15 +192,17 @@ class CadDrawingAnalyzerChain(SequentialChain):
             "If you cannot prove the axial layer from the section view, set the hole placement fields to `unknown` and describe the ambiguity in `uncertainties` instead of guessing `top`.\n"
             "Keep `notes` minimal, usually empty or a single short item. Keep `axial_layer_reasoning` to one short sentence.\n"
             "Do not duplicate the same entity in multiple views unless the second view adds necessary axial information.\n"
+            "## Validator Issues To Fix\n"
+            "{review_issues}\n"
             "Start now."
         )
 
         prompt = ChatPromptTemplate(
-            input_variables=["image_type", "image_data"],
+            input_variables=["image_type", "image_data", "review_issues"],
             messages=[
                 HumanMessagePromptTemplate(
                     prompt=[
-                        PromptTemplate(input_variables=[], template=analyze_prompt),
+                        PromptTemplate(input_variables=["review_issues"], template=analyze_prompt),
                         ImagePromptTemplate(
                             input_variables=["image_type", "image_data"],
                             template={"url": "data:image/{image_type};base64,{image_data}"},
@@ -221,8 +223,8 @@ class CadDrawingAnalyzerChain(SequentialChain):
                     atransform=None,
                 ),
             ],
-            input_variables=["image_type", "image_data"],
-            output_variables=["result"],
+            input_variables=["image_type", "image_data", "review_issues"],
+            output_variables=["text", "result"],
             verbose=True,
         )
         self.model_type = model_type
@@ -237,6 +239,10 @@ class CadDrawingAnalyzerChain(SequentialChain):
             inputs["input"] = inputs["input"].convert("png")
         inputs["image_type"] = inputs["input"].media_type
         inputs["image_data"] = inputs["input"].data
+        review_issues = inputs.get("review_issues", [])
+        if isinstance(review_issues, list):
+            review_issues = "\n".join(f"- {issue}" for issue in review_issues) if review_issues else "- No validator issues provided."
+        inputs["review_issues"] = str(review_issues).strip() or "- No validator issues provided."
         return inputs
 
 
@@ -255,17 +261,20 @@ class CadDrawingScopedAnalyzerChain(SequentialChain):
             f"{_COMMON_ANALYSIS_RULES}"
             f"Current scope: {scope_name}.\n"
             f"{scope_instructions}\n"
+            "If validator issues are provided, use them to fill in missing or conflicting information for this scope.\n"
             "Return JSON only using this schema:\n"
             f"{escaped_schema_text}\n"
+            "## Validator Issues To Fix\n"
+            "{review_issues}\n"
             "Start now."
         )
 
         prompt = ChatPromptTemplate(
-            input_variables=["image_type", "image_data"],
+            input_variables=["image_type", "image_data", "review_issues"],
             messages=[
                 HumanMessagePromptTemplate(
                     prompt=[
-                        PromptTemplate(input_variables=[], template=analyze_prompt),
+                        PromptTemplate(input_variables=["review_issues"], template=analyze_prompt),
                         ImagePromptTemplate(
                             input_variables=["image_type", "image_data"],
                             template={"url": "data:image/{image_type};base64,{image_data}"},
@@ -286,8 +295,8 @@ class CadDrawingScopedAnalyzerChain(SequentialChain):
                     atransform=None,
                 ),
             ],
-            input_variables=["image_type", "image_data"],
-            output_variables=["result"],
+            input_variables=["image_type", "image_data", "review_issues"],
+            output_variables=["text", "result"],
             verbose=True,
         )
         self.model_type = model_type
@@ -302,6 +311,10 @@ class CadDrawingScopedAnalyzerChain(SequentialChain):
             inputs["input"] = inputs["input"].convert("png")
         inputs["image_type"] = inputs["input"].media_type
         inputs["image_data"] = inputs["input"].data
+        review_issues = inputs.get("review_issues", [])
+        if isinstance(review_issues, list):
+            review_issues = "\n".join(f"- {issue}" for issue in review_issues) if review_issues else "- No validator issues provided."
+        inputs["review_issues"] = str(review_issues).strip() or "- No validator issues provided."
         return inputs
 
 
@@ -351,7 +364,7 @@ class CadAnalysisRefinerChain(SequentialChain):
                 ),
             ],
             input_variables=prompt.input_variables,
-            output_variables=["result"],
+            output_variables=["text", "result"],
             verbose=True,
         )
         self.model_type = model_type

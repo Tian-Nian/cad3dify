@@ -25,6 +25,8 @@ class ChatModelParameters(BaseModel):
     max_tokens: int | None = None
     base_url: str | None = None
     api_key: str | None = None
+    request_timeout: float | None = None
+    max_retries: int = 2
 
     @staticmethod
     def _normalize_openai_base_url(base_url: str) -> str:
@@ -42,6 +44,8 @@ class ChatModelParameters(BaseModel):
             model_name="gpt-5-2025-08-07",
             temperature=1.0,
             max_tokens=128000,
+            request_timeout=float(os.getenv("OPENAI_REQUEST_TIMEOUT", "180")),
+            max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "3")),
         )
 
     @classmethod
@@ -56,6 +60,8 @@ class ChatModelParameters(BaseModel):
                 model_name="gpt-5-2025-08-07",
                 temperature=temperature,
                 max_tokens=128000,
+                request_timeout=float(os.getenv("OPENAI_REQUEST_TIMEOUT", "180")),
+                max_retries=int(os.getenv("OPENAI_MAX_RETRIES", "3")),
             ),
             "claude": cls(
                 provider="anthropic",
@@ -81,6 +87,8 @@ class ChatModelParameters(BaseModel):
                 max_tokens=int(os.getenv("CUSTOM_OPENAI_MAX_TOKENS", "4096")),
                 base_url=os.getenv("CUSTOM_OPENAI_BASE_URL"),
                 api_key=os.getenv("CUSTOM_OPENAI_API_KEY"),
+                request_timeout=float(os.getenv("CUSTOM_OPENAI_REQUEST_TIMEOUT", "180")),
+                max_retries=int(os.getenv("CUSTOM_OPENAI_MAX_RETRIES", "4")),
             ),
         }
         return model_type_to_parameters.get(model_type, cls.default())
@@ -91,6 +99,8 @@ class ChatModelParameters(BaseModel):
                 model=self.model_name,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                timeout=self.request_timeout,
+                max_retries=self.max_retries,
             )
         elif self.provider == "openai_compatible":
             import httpx
@@ -116,7 +126,9 @@ class ChatModelParameters(BaseModel):
                 max_tokens=self.max_tokens,
                 base_url=normalized_base_url,
                 api_key=api_key,
-                http_client=httpx.Client(timeout=60.0, trust_env=False),
+                timeout=self.request_timeout,
+                max_retries=self.max_retries,
+                http_client=httpx.Client(timeout=self.request_timeout or 180.0, trust_env=False),
             )
         elif self.provider == "anthropic":
             return ChatAnthropic(

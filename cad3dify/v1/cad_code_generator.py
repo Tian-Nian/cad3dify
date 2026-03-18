@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 import textwrap
@@ -11,13 +12,44 @@ from ..chat_models import MODEL_TYPE, ChatModelParameters
 from ..image import ImageData
 
 
+def _contains_cadquery_markers(text: str) -> bool:
+    return any(marker in text for marker in ("import cadquery", "from cadquery import", "cq.Workplane", "exporters.export"))
+
+
+def _is_parsable_python(text: str) -> bool:
+    try:
+        ast.parse(text)
+    except SyntaxError:
+        return False
+    return True
+
+
+def _extract_python_tail(text: str) -> str | None:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("import ", "from ", "def ", "class ")) or re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", stripped):
+            candidate = "\n".join(lines[index:]).strip()
+            if _contains_cadquery_markers(candidate) and _is_parsable_python(candidate):
+                return candidate
+            return None
+    return None
+
+
 def _parse_code(input: dict) -> dict:
-    match = re.search(r"```(?:python)?\n(.*?)\n```", input["text"], re.DOTALL)
-    if match:
+    text = str(input.get("text") or "").strip()
+    for match in re.finditer(r"```(?:python)?\n(.*?)\n```", text, re.DOTALL):
         code_output = match.group(1).strip()
-        return {"result": code_output}
-    else:
-        return {"result": None}
+        if _contains_cadquery_markers(code_output) and _is_parsable_python(code_output):
+            return {"result": code_output}
+    if _contains_cadquery_markers(text) and _is_parsable_python(text):
+        return {"result": text}
+    extracted = _extract_python_tail(text)
+    if extracted:
+        return {"result": extracted}
+    return {"result": None}
 
 
 def _normalize_spec_json(input: dict) -> dict:
@@ -271,6 +303,11 @@ _design_steps = """
      - **Note**: Manually entering numbers makes changes difficult later.
 """
 
+_normalized_contract_note = (
+    "* If the analysis bundle contains normalized_contract.json, treat it as the canonical resolved contract for final modeling dimensions and feature relationships.\n"
+    "* If raw per-view snippets conflict with normalized_contract.json, prefer normalized_contract.json because it already resolves cross-view ambiguity.\n"
+)
+
 
 class CadCodeGeneratorChain(SequentialChain):
     model_type: MODEL_TYPE = "gpt"
@@ -320,7 +357,7 @@ class CadCodeGeneratorChain(SequentialChain):
                 ),
             ],
             input_variables=["image_type", "image_data"],
-            output_variables=["result"],
+            output_variables=["text", "result"],
             verbose=True,
         )
         self.model_type = model_type
@@ -350,6 +387,7 @@ class CadCodeFromJsonGeneratorChain(SequentialChain):
             "The JSON is the source of truth. If the JSON and your intuition conflict, follow the JSON.\n"
             "Your output will be checked by a strict validator for dimension coverage, feature coverage, hole start face, and chamfer/fillet presence.\n"
             "## Requirements\n"
+            f"{_normalized_contract_note}"
             "* Use `cadquery.exporters.export` to output the created 3D model as a STEP file.\n"
             "* Where you describe the output file path, use the template string `${{output_filename}}`.\n"
             "* Define key dimensions as variables.\n"
@@ -373,6 +411,11 @@ class CadCodeFromJsonGeneratorChain(SequentialChain):
             "* Do not wrap an explicit required fillet/chamfer in a try/except that silently falls back to `pass`. If a selector-based fillet is risky, change the construction strategy.\n"
             "* Return one self-consistent final implementation, not a version that expects downstream manual touch-up.\n"
             "* Do not include exploratory branches, duplicate model rebuilds, or fallback snippets that are not actually executed.\n"
+            "* Model from geometry relationships first. Reconstruct the solid from profile ownership, relative sizes, symmetry, and cross-view mappings instead of assuming a known part family.\n"
+            "* Keep reference geometry separate from material boundaries. A pitch circle, centerline, datum, symmetry axis, or alignment aid must not become solid material unless the JSON says it is.\n"
+            "* If a contour is visible from one view through another opening or at another depth level, create the supporting face/layer first and then place the feature on its true owning face.\n"
+            "* When a section shows mixed solid and void bands, prefer a revolved/sketched profile or a clearly layered constructive sequence that preserves those relationships before applying repeated cuts.\n"
+            "* Preserve relative relationships from the JSON, including containment, offsets, concentricity, symmetry, tangency, and adjacency, even when some dimensions are uncertain.\n"
             "* Write code following these steps:\n"
             f"{textwrap.indent(_design_steps, prefix='  ')}\n"
             "## CAD Specification JSON\n"
@@ -382,7 +425,7 @@ class CadCodeFromJsonGeneratorChain(SequentialChain):
             "## CadQuery Sample Code\n"
             f"{sample_codes}\n"
             "## Start here\n"
-            "Output code:"
+            "Output code as a single complete CadQuery program. Do not include prose before or after the code block."
         )
         prompt = ChatPromptTemplate(
             input_variables=["analysis_json_text"],
@@ -411,7 +454,7 @@ class CadCodeFromJsonGeneratorChain(SequentialChain):
                 ),
             ],
             input_variables=["analysis_json"],
-            output_variables=["result"],
+            output_variables=["text", "result"],
             verbose=True,
         )
         self.model_type = model_type

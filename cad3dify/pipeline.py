@@ -10,12 +10,23 @@ from loguru import logger
 
 from .chat_models import MODEL_TYPE
 from .image import ImageData
-from .spec_alignment import format_analysis_report, format_code_report, validate_analysis_payload, validate_generated_code
+from .spec_alignment import build_contract, format_analysis_report, format_code_report, normalize_analysis_payload, validate_analysis_payload, validate_generated_code
+from .step_inspector import inspect_step
 from .v1.cad_code_generator import CadCodeFromJsonGeneratorChain
 from .v1.cad_code_refiner import CadCodeRefinerChain
 from .v1.drawing_analyzer import CadAnalysisRefinerChain, CadDrawingAnalyzerChain, CadDrawingScopedAnalyzerChain
 
 STAGES = ("analyze-drawing", "generate-code", "execute-code", "refine-code")
+
+NON_BLOCKING_ANALYSIS_ISSUES = {
+    "顶视可见上开口直径与剖视上台阶孔直径不一致。",
+}
+
+REFINER_FORMAT_RETRY_NOTE = (
+    "## Response format correction\n"
+    "Your previous response did not yield a parsable Python program. Return exactly one complete CadQuery Python program inside a ```python fenced block. "
+    "Do not include prose, bullet points, JSON, diff text, or commentary outside the code block."
+)
 
 
 def _write_json(filepath: Path, payload: dict) -> None:
@@ -46,6 +57,190 @@ def _analysis_report_file(workspace_dir: Path) -> Path:
     return workspace_dir / "analysis_alignment_report.txt"
 
 
+def _step_inspection_file(workspace_dir: Path, version: int) -> Path:
+    return workspace_dir / f"step_inspection_v{version:02d}.json"
+
+
+def _step_inspection_views_dir(workspace_dir: Path, version: int) -> Path:
+    return workspace_dir / f"step_inspection_v{version:02d}_views"
+
+
+def _has_reference_comparison(inspection_payload: dict) -> bool:
+    return isinstance(inspection_payload.get("comparison"), dict) and isinstance(inspection_payload.get("reference_summary"), dict)
+
+
+def _step_comparison_issues(inspection_payload: dict) -> list[str]:
+    comparison = inspection_payload.get("comparison") or {}
+    issues: list[str] = []
+
+    bbox_delta = comparison.get("bbox_size_delta_mm") or {}
+    for axis in ("x", "y", "z"):
+        value = bbox_delta.get(axis)
+        if value is None:
+            continue
+        if abs(float(value)) > 1e-6:
+            issues.append(f"Bounding-box size mismatch on {axis.upper()} axis: delta {float(value):.3f} mm.")
+
+    volume_delta = comparison.get("volume_delta_mm3")
+    if volume_delta is not None and abs(float(volume_delta)) > 1e-3:
+        issues.append(f"Volume mismatch versus reference STEP: delta {float(volume_delta):.3f} mm^3.")
+
+    solid_count_delta = comparison.get("solid_count_delta")
+    if solid_count_delta is not None and int(solid_count_delta) != 0:
+        issues.append(f"Solid-count mismatch versus reference STEP: delta {int(solid_count_delta)}.")
+
+    face_delta = comparison.get("face_type_delta") or {}
+    for face_type, value in sorted(face_delta.items()):
+        if int(value) != 0:
+            issues.append(f"Face-type count mismatch for {face_type}: delta {int(value)}.")
+
+    edge_delta = comparison.get("edge_type_delta") or {}
+    for edge_type, value in sorted(edge_delta.items()):
+        if int(value) != 0:
+            issues.append(f"Edge-type count mismatch for {edge_type}: delta {int(value)}.")
+
+    summary = inspection_payload.get("summary") or {}
+    reference_summary = inspection_payload.get("reference_summary") or {}
+
+    summary_bbox = (summary.get("bounding_box") or {}).get("center_mm") or {}
+    reference_bbox = (reference_summary.get("bounding_box") or {}).get("center_mm") or {}
+    for axis in ("x", "y", "z"):
+        current = summary_bbox.get(axis)
+        reference = reference_bbox.get(axis)
+        if current is None or reference is None:
+            continue
+        delta = float(current) - float(reference)
+        if abs(delta) > 1e-6:
+            issues.append(f"Bounding-box center mismatch on {axis.upper()} axis: delta {delta:.3f} mm.")
+
+    summary_faces = (summary.get("faces") or {}).get("cylindrical_features") or []
+    reference_faces = (reference_summary.get("faces") or {}).get("cylindrical_features") or []
+    if summary_faces and reference_faces:
+        current_axis = summary_faces[0].get("dominant_axis")
+        reference_axis = reference_faces[0].get("dominant_axis")
+        if current_axis and reference_axis and current_axis != reference_axis:
+            issues.append(
+                f"Dominant cylinder axis mismatch: current model is {current_axis}-dominant but reference is {reference_axis}-dominant."
+            )
+
+    summary_views = (summary.get("orthographic_views") or {})
+    reference_views = (reference_summary.get("orthographic_views") or {})
+    for view_name in ("top", "front", "right"):
+        current_view = summary_views.get(view_name) or {}
+        reference_view = reference_views.get(view_name) or {}
+        current_circles = len(current_view.get("circular_edges") or [])
+        reference_circles = len(reference_view.get("circular_edges") or [])
+        if current_circles != reference_circles:
+            issues.append(
+                f"Orthographic {view_name} view exposes {current_circles} circular-edge groups, reference exposes {reference_circles}."
+            )
+
+    return issues
+
+
+def _format_step_comparison_feedback(inspection_payload: dict) -> str:
+    if not _has_reference_comparison(inspection_payload):
+        return ""
+
+    summary = inspection_payload.get("summary") or {}
+    reference_summary = inspection_payload.get("reference_summary") or {}
+    comparison = inspection_payload.get("comparison") or {}
+    issues = _step_comparison_issues(inspection_payload)
+    if not issues:
+        return ""
+
+    current_cyl_features = (summary.get("faces") or {}).get("cylindrical_features") or []
+    reference_cyl_features = (reference_summary.get("faces") or {}).get("cylindrical_features") or []
+    current_axis = current_cyl_features[0].get("dominant_axis") if current_cyl_features else None
+    reference_axis = reference_cyl_features[0].get("dominant_axis") if reference_cyl_features else None
+    reference_bbox_size = (reference_summary.get("bounding_box") or {}).get("size_mm") or {}
+
+    repair_expectations = [
+        "- Keep the normalized contract as the primary source of truth.",
+        "- Use the reference STEP only to recover missing or oversimplified geometric layers, rounds, annular steps, hole depths, and repeated feature structure that remain compatible with the contract.",
+        "- If the current model collapses multiple axial layers into one simple revolve, rebuild the section profile or constructive sequence so the resulting STEP exposes the missing faces and edges seen in the reference.",
+        "- The next candidate must export exactly one fused solid and must not leave detached solids after boolean operations.",
+        "- Keep the part aligned to the same global axis and center as the reference unless the normalized contract explicitly says otherwise.",
+        "- If torus faces are missing in the comparison, rebuild the relevant round transitions as real arcs/fillets instead of leaving hard steps.",
+    ]
+
+    if current_axis and reference_axis and current_axis != reference_axis:
+        repair_expectations.append(
+            f"- The reference STEP is {reference_axis}-dominant for cylindrical features. Rebuild the main bore and hole operations along global {reference_axis}, not along global {current_axis}. Do not just rotate the finished body after modeling if that would move faces away from their owning layers."
+        )
+
+    if reference_bbox_size:
+        repair_expectations.append(
+            "- Use the reference global envelope as a hard coordinate-frame target: "
+            f"X={reference_bbox_size.get('x', 'unknown')} mm, "
+            f"Y={reference_bbox_size.get('y', 'unknown')} mm, "
+            f"Z={reference_bbox_size.get('z', 'unknown')} mm. If your next candidate assigns the 369 mm overall height to Z instead of Y, the coordinate frame is still wrong."
+        )
+
+    bbox_delta = comparison.get("bbox_size_delta_mm") or {}
+    if any(abs(float(bbox_delta.get(axis, 0.0))) > 1e-6 for axis in ("x", "y", "z")):
+        repair_expectations.append(
+            "- Treat large bounding-box axis deltas as a coordinate-frame or envelope-construction bug. Rebuild the part so the long overall height axis, base depth axis, and width axis land on the same global axes as the reference before adding secondary detail."
+        )
+
+    sections = [
+        "## STEP comparison against reference",
+        f"Generated STEP: {summary.get('source', 'unknown')}",
+        f"Reference STEP: {reference_summary.get('source', 'unknown')}",
+        f"Generated solid_count: {summary.get('solid_count', 'unknown')}",
+        f"Reference solid_count: {reference_summary.get('solid_count', 'unknown')}",
+        f"Generated bbox center: {json.dumps((summary.get('bounding_box') or {}).get('center_mm') or {}, ensure_ascii=False)}",
+        f"Reference bbox center: {json.dumps((reference_summary.get('bounding_box') or {}).get('center_mm') or {}, ensure_ascii=False)}",
+        "### Comparison summary",
+        json.dumps(comparison, ensure_ascii=False, indent=2),
+        "### Mismatches to fix",
+        "\n".join(f"- {issue}" for issue in issues),
+        "### Repair expectations",
+        *repair_expectations,
+    ]
+    return "\n".join(sections)
+
+
+def _blocking_analysis_issues(issues: list[str]) -> list[str]:
+    return [issue for issue in issues if issue not in NON_BLOCKING_ANALYSIS_ISSUES]
+
+
+def _invoke_analysis_json_chain_with_retries(
+    chain,
+    inputs: dict,
+    description: str,
+    max_attempts: int = 3,
+) -> dict | None:
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            result = chain.invoke(inputs)["result"]
+        except Exception as exc:  # pragma: no cover - exercised through pipeline tests via mocks
+            last_error = exc
+            logger.warning(
+                "{} failed on attempt {}/{}: {}",
+                description,
+                attempt + 1,
+                max_attempts,
+                exc,
+            )
+            continue
+
+        if result:
+            return result
+
+        logger.warning(
+            "{} returned no valid JSON on attempt {}/{}.",
+            description,
+            attempt + 1,
+            max_attempts,
+        )
+
+    if last_error is not None:
+        logger.warning("{} exhausted retries after repeated upstream/model errors.", description)
+    return None
+
+
 def _code_report_file(workspace_dir: Path, version: int) -> Path:
     return workspace_dir / f"code_alignment_v{version:02d}.txt"
 
@@ -68,6 +263,85 @@ def _load_metadata(workspace_dir: Path) -> dict:
     if not metadata_path.exists():
         raise FileNotFoundError(f"Workflow metadata not found: {metadata_path}")
     return _read_json(metadata_path)
+
+
+def _has_required_views(payload: dict) -> bool:
+    views = payload.get("views", [])
+    top_present = any(str(view.get("view_type", "")).lower() == "top" or str(view.get("name", "")).lower() == "top_view" for view in views)
+    section_present = any(str(view.get("view_type", "")).lower() == "section" for view in views)
+    return top_present and section_present
+
+
+def _merge_analysis_with_fallback(primary: dict, fallback: dict) -> dict:
+    if not primary.get("drawing_summary"):
+        primary["drawing_summary"] = fallback.get("drawing_summary", {})
+    if not primary.get("section_interpretation"):
+        primary["section_interpretation"] = fallback.get("section_interpretation", {})
+    primary_views = [view for view in primary.get("views", []) if isinstance(view, dict)]
+    fallback_views = [view for view in fallback.get("views", []) if isinstance(view, dict)]
+    if not primary_views:
+        primary["views"] = fallback_views
+    else:
+        def _is_top_view(view: dict) -> bool:
+            return str(view.get("view_type", "")).lower() == "top" or str(view.get("name", "")).lower() == "top_view"
+
+        def _is_section_view(view: dict) -> bool:
+            return str(view.get("view_type", "")).lower() == "section"
+
+        has_top = any(_is_top_view(view) for view in primary_views)
+        has_section = any(_is_section_view(view) for view in primary_views)
+
+        for fallback_view in fallback_views:
+            if _is_top_view(fallback_view) and not has_top:
+                primary_views.append(fallback_view)
+                has_top = True
+            elif _is_section_view(fallback_view) and not has_section:
+                primary_views.append(fallback_view)
+                has_section = True
+
+        primary["views"] = primary_views
+    if not primary.get("global_constraints"):
+        primary["global_constraints"] = fallback.get("global_constraints", [])
+    if not primary.get("modeling_sequence"):
+        primary["modeling_sequence"] = fallback.get("modeling_sequence", [])
+
+    primary_uncertainties = primary.get("uncertainties", [])
+    fallback_uncertainties = fallback.get("uncertainties", [])
+    if fallback_uncertainties:
+        primary["uncertainties"] = primary_uncertainties + [
+            item for item in fallback_uncertainties if item not in primary_uncertainties
+        ]
+    return primary
+
+
+def _detect_reference_step(source_path: Path) -> Path | None:
+    for suffix in (".stp", ".step", ".STP", ".STEP"):
+        candidate = source_path.with_suffix(suffix)
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def _run_step_inspection(workspace_path: Path, version: int, step_path: Path, metadata: dict) -> Path:
+    reference_step_value = metadata.get("reference_step")
+    reference_step = Path(reference_step_value).expanduser().resolve() if reference_step_value else None
+    export_views_dir = _step_inspection_views_dir(workspace_path, version)
+    result = inspect_step(
+        step_filepath=step_path,
+        compare_to=reference_step if reference_step and reference_step.exists() else None,
+        export_views_dir=export_views_dir,
+    )
+    target = _step_inspection_file(workspace_path, version)
+    _write_json(target, result)
+    logger.info(f"STEP inspection saved to {target}")
+    return target
+
+
+def _load_step_inspection_payload(workspace_path: Path, version: int) -> dict | None:
+    target = _step_inspection_file(workspace_path, version)
+    if not target.exists():
+        return None
+    return _read_json(target)
 
 
 def _write_analysis_parts(parts_dir: Path, payload: dict) -> None:
@@ -105,8 +379,8 @@ def _load_analysis_payload(workspace_dir: Path, generated: bool = False) -> dict
             "modeling_sequence": _read_json(parts_dir / "modeling_sequence.json").get("modeling_sequence", []) if (parts_dir / "modeling_sequence.json").exists() else [],
             "uncertainties": _read_json(parts_dir / "uncertainties.json").get("uncertainties", []) if (parts_dir / "uncertainties.json").exists() else [],
         }
-        return payload
-    return _read_json(_analysis_file(workspace_dir, generated=generated))
+        return normalize_analysis_payload(payload)
+    return normalize_analysis_payload(_read_json(_analysis_file(workspace_dir, generated=generated)))
 
 
 def _agent_analysis_exists(workspace_dir: Path) -> bool:
@@ -119,9 +393,9 @@ def _load_agent_analysis_payload(workspace_dir: Path) -> dict:
     return _load_analysis_payload(workspace_dir, generated=False)
 
 
-def _analysis_documents_text(workspace_dir: Path) -> str:
-    payload = _load_agent_analysis_payload(workspace_dir)
+def _analysis_documents_text_from_payload(payload: dict) -> str:
     parts = [
+        "## normalized_contract.json\n```json\n" + json.dumps(build_contract(payload), ensure_ascii=False, indent=2) + "\n```",
         "## drawing_summary.json\n```json\n" + json.dumps(payload.get("drawing_summary", {}), ensure_ascii=False, indent=2) + "\n```",
         "## section_interpretation.json\n```json\n" + json.dumps(payload.get("section_interpretation", {}), ensure_ascii=False, indent=2) + "\n```",
     ]
@@ -132,6 +406,11 @@ def _analysis_documents_text(workspace_dir: Path) -> str:
     parts.append("## modeling_sequence.json\n```json\n" + json.dumps({"modeling_sequence": payload.get("modeling_sequence", [])}, ensure_ascii=False, indent=2) + "\n```")
     parts.append("## uncertainties.json\n```json\n" + json.dumps({"uncertainties": payload.get("uncertainties", [])}, ensure_ascii=False, indent=2) + "\n```")
     return "\n\n".join(parts)
+
+
+def _analysis_documents_text(workspace_dir: Path) -> str:
+    payload = _load_agent_analysis_payload(workspace_dir)
+    return _analysis_documents_text_from_payload(payload)
 
 
 def _force_output_filepath(code: str, output_path: Path) -> str:
@@ -149,11 +428,13 @@ def _force_output_filepath(code: str, output_path: Path) -> str:
 
 
 def _write_agent_analysis_payload(workspace_path: Path, payload: dict) -> None:
+    payload = normalize_analysis_payload(payload)
     _write_json(_analysis_file(workspace_path, generated=True), payload)
     _write_analysis_parts(_analysis_parts_dir(workspace_path, generated=True), payload)
 
 
 def _write_review_analysis_payload(workspace_path: Path, payload: dict) -> None:
+    payload = normalize_analysis_payload(payload)
     _write_json(_analysis_file(workspace_path, generated=False), payload)
     _write_analysis_parts(_analysis_parts_dir(workspace_path, generated=False), payload)
 
@@ -162,18 +443,45 @@ def _repair_analysis_until_aligned(
     workspace_path: Path,
     metadata: dict,
     initial_payload: dict,
-    max_attempts: int = 2,
+    max_attempts: int = 6,
 ) -> dict:
-    payload = initial_payload
+    payload = normalize_analysis_payload(initial_payload)
     issues = validate_analysis_payload(payload)
+    blocking_issues = _blocking_analysis_issues(issues)
     attempt = 0
-    while issues and attempt < max_attempts:
+    while blocking_issues and attempt < max_attempts:
+        logger.warning(
+            "Analysis alignment repair attempt {}/{} with {} blocking issues.",
+            attempt + 1,
+            max_attempts,
+            len(blocking_issues),
+        )
         chain = CadAnalysisRefinerChain(model_type=metadata["model_type"])
-        repaired = chain.invoke({"analysis_json": payload, "issues": issues})["result"]
-        if not repaired:
-            break
-        payload = repaired
+        repaired = _invoke_analysis_json_chain_with_retries(
+            chain,
+            {
+                "analysis_json": _analysis_documents_text_from_payload(payload),
+                "issues": blocking_issues,
+            },
+            description="Analysis alignment refiner",
+        )
+        if repaired:
+            payload = normalize_analysis_payload(repaired)
+            issues = validate_analysis_payload(payload)
+            blocking_issues = _blocking_analysis_issues(issues)
+            if not blocking_issues:
+                break
+
+        image_data = ImageData.load_from_file(metadata["source_image"])
+        supplemented = _invoke_analysis_json_chain_with_retries(
+            CadDrawingAnalyzerChain(model_type=metadata["model_type"]),
+            {"input": image_data, "review_issues": blocking_issues},
+            description="Fallback full-drawing analysis",
+        )
+        if supplemented:
+            payload = normalize_analysis_payload(_merge_analysis_with_fallback(payload, supplemented))
         issues = validate_analysis_payload(payload)
+        blocking_issues = _blocking_analysis_issues(issues)
         attempt += 1
     return payload
 
@@ -223,13 +531,13 @@ def _refine_code_from_feedback(
     feedback: str,
 ) -> str:
     chain = CadCodeRefinerChain(model_type=metadata["model_type"])
-    result = chain.invoke(
-        {
-            "analysis_json": _analysis_documents_text(workspace_path),
-            "code": current_code,
-            "feedback": feedback,
-        }
-    )["result"]
+    analysis_documents = _analysis_documents_text(workspace_path)
+    result = _invoke_refiner_chain_with_retries(
+        chain=chain,
+        analysis_documents=analysis_documents,
+        code=current_code,
+        feedback=feedback,
+    )
     if not result:
         raise ValueError("CAD code refinement failed: model response did not contain parsable code.")
 
@@ -239,6 +547,29 @@ def _refine_code_from_feedback(
         analysis_payload=analysis_payload,
         initial_code=result,
     )
+
+
+def _invoke_refiner_chain_with_retries(
+    chain: CadCodeRefinerChain,
+    analysis_documents: str,
+    code: str,
+    feedback: str,
+    max_attempts: int = 3,
+) -> str | None:
+    retry_feedback = feedback.strip()
+    for attempt in range(max_attempts):
+        result = chain.invoke(
+            {
+                "analysis_json": analysis_documents,
+                "code": code,
+                "feedback": retry_feedback,
+            }
+        )["result"]
+        if result:
+            return result
+        logger.warning("Refiner returned no parsable code block on attempt {}.", attempt + 1)
+        retry_feedback = "\n\n".join(section for section in (retry_feedback, REFINER_FORMAT_RETRY_NOTE) if section.strip())
+    return None
 
 
 def _next_model_version(workspace_dir: Path) -> int:
@@ -288,9 +619,13 @@ def initialize_workflow(
 
     metadata = {
         "model_type": model_type,
+        "original_source_image": str(source_path),
         "source_image": str(copied_image),
         "output_filename": output_filename,
     }
+    reference_step = _detect_reference_step(source_path)
+    if reference_step is not None:
+        metadata["reference_step"] = str(reference_step)
     _write_json(_metadata_file(workspace_path), metadata)
 
     if not _feedback_file(workspace_path).exists():
@@ -315,17 +650,17 @@ def run_analysis_stage(workspace_dir: str) -> Path:
         (
             "top_view",
             "{\n  \"name\": \"top_view\",\n  \"view_type\": \"top\",\n  \"summary\": \"\",\n  \"contour_stack\": [\n    {\n      \"order\": 1,\n      \"diameter\": null,\n      \"role\": \"outer_silhouette|visible_opening|recess_boundary|pattern_reference|hidden_only\",\n      \"material_state\": \"solid_boundary|void|transition|reference_only|unknown\",\n      \"visible_on_face\": \"top_face|recess_floor|internal_floor|lower_step_face|bottom_face|unknown\",\n      \"appearance_reason\": \"direct_edge_on_current_face|seen_through_upper_opening|hidden_only|unknown\",\n      \"owned_by_section_band\": \"\",\n      \"evidence\": \"\"\n    }\n  ],\n  \"entities\": [],\n  \"dimensions\": [],\n  \"cross_view_mapping\": [\n    {\n      \"top_contour_order\": 1,\n      \"section_band_id\": \"\",\n      \"section_face\": \"top_face|recess_floor|internal_floor|lower_step_face|bottom_face|unknown\",\n      \"relationship\": \"same_edge|opening_to_band|edge_of_visible_floor|hole_on_visible_floor|hidden_bore|unknown\"\n    }\n  ],\n  \"notes\": []\n}",
-            "Extract only the top view. First enumerate the visible concentric contours from outside to inside in `contour_stack`. For each contour, explicitly state which physical face owns that contour and why it is visible from above. Then encode each contour or pattern as geometry: outer silhouette, visible opening, recess boundary, lower-floor edge seen through an opening, hole-pattern reference, or hidden deeper feature inferred from section. Keep visible contour diameters separate from hole PCD. Use standardized ids when possible: `bolt_hole_pattern`, `central_bore`, `upper_opening`, `top_recess`. Use standardized diameter labels in `dimensions` when possible: `outer_diameter_flange`, `inner_diameter_upper`, `inner_diameter_bore`, `recess_seat_diameter`, `bolt_circle_diameter`. For each hole/cut/recess, include material_state, axial_extent, feature_placement, evidence, and the face on which it is visible. Never use the upper opening diameter or any profile diameter as the hole PCD unless the drawing explicitly dimensions the hole center circle that way. If the hole centers lie inside a larger visible top opening, the holes cannot belong to the outer top rim; assign them to a lower visible face or mark them unknown. If section data shows an R-radius transition between two levels, preserve that as a geometric note but do not invent an extra top-view contour unless the drawing actually shows one. Top-view output must be sufficient to reconstruct the plan-view footprint without guessing and without flattening multiple Z levels into one plane.",
+            "Extract only the top view. Enumerate the visible contour stack in `contour_stack` and preserve outside-to-inside ordering wherever it matters. For each contour, explicitly state which physical face owns that contour and why it is visible. Encode each contour or pattern as geometry such as outer silhouette, visible opening, recess boundary, reference pattern, or hidden deeper feature inferred from section. Keep reference dimensions like pitch circles separate from material boundaries. Use stable semantic ids when possible, but prefer geometric meaning over guessed part-family names. For each hole, cut, recess, boss, or repeated feature, include material_state, axial_extent, feature_placement, evidence, and the face on which it is visible. If multiple depth levels are visible in the same plan view, keep them as separate owned contours instead of flattening them into one plane. Preserve relative size, containment, symmetry, concentricity, and adjacency relationships even when some dimensions are not explicit. Top-view output must be sufficient to reconstruct the plan-view footprint without guessing. If the part is a bracket/support/prismatic body, the true top view must contain the full base footprint. A standing plate view with a circular bore shown in true shape is usually an elevation rather than the plan view; do not mislabel it as `top_view`.",
         ),
         (
             "section_view",
             "{\n  \"name\": \"section_A-A\",\n  \"view_type\": \"section\",\n  \"summary\": \"\",\n  \"axial_bands\": [\n    {\n      \"band_id\": \"\",\n      \"band_role\": \"top_rim|upper_opening|internal_floor|middle_bore|lower_bore|solid_wall|unknown\",\n      \"axial_start\": null,\n      \"axial_end\": null,\n      \"outer_diameter\": null,\n      \"inner_diameter\": null,\n      \"annular_region\": \"solid|void|mixed|unknown\",\n      \"top_visibility\": \"visible_from_above|not_visible_from_above|hidden_but_dimensionally_required|unknown\",\n      \"evidence\": \"\"\n    }\n  ],\n  \"entities\": [],\n  \"dimensions\": [],\n  \"cross_view_mapping\": [],\n  \"notes\": []\n}",
-            "Extract only the main section view. Decompose the cross-section into axial bands from datum face to opposite face in `axial_bands`. For each band, state OD, ID, whether the annular region is solid, void, or mixed, and whether that band creates edges visible from above. Use standardized ids when possible: `bolt_holes`, `central_bore`, `recessed_hole_seat`, `bottom_outer_chamfer`, `fillet_inner`. Use standardized dimension labels when possible: `outer_diameter_flange`, `outer_diameter_body`, `inner_diameter_upper`, `inner_diameter_bore`, `recess_seat_diameter`, `total_height`, `lower_flange_height`, `middle_body_height`, `upper_flange_height`, `bolt_circle_diameter`. Explicitly capture where every cut feature starts, whether a step face is recessed, and whether any outer-edge chamfer/relief exists. If the section dimensions an R-value at a transition, encode it as a fillet feature with exact radius and exact adjoining faces; do not simplify it into a step or label it a chamfer. Do not claim the section directly shows hole slots unless the cutting plane intersects them. If the section misses the hole axes, do not set `bolt_holes.start_face=top` just because the holes are visible in the top view. Never use a profile diameter like 129 or 105 as the hole PCD unless the drawing explicitly dimensions the hole center circle. Never turn an internal opening diameter into `outer_diameter_body` unless the section silhouette clearly shows an external OD step at that same diameter. Section output must be sufficient to reconstruct the full side/section profile without guessing and must explain which internal faces are visible from the top opening.",
+            "Extract only the main section view. Decompose the cross-section into axial bands from datum face to opposite face in `axial_bands`. For each band, state the outer boundary, inner boundary, whether the region is solid, void, or mixed, and whether that band creates edges visible from other views. Explicitly capture where every cut feature starts, whether a face is recessed, and whether any silhouette-only chamfer, relief, or round exists. If the section dimensions an R-value at a transition, encode it as a fillet feature with exact radius and adjoining geometry; do not simplify it into a step or label it a chamfer. Do not claim the section directly shows holes or slots unless the cutting plane intersects them. If the section misses a repeated feature axis, use the section for layer inference only. Preserve section-defined relative relationships such as wall thickness, offsets, coaxial steps, tangencies, and layer order. Section output must be sufficient to reconstruct the full profile without guessing and must explain which internal faces are visible through other openings. For bracket/support/prismatic parts, use the section to capture thickness/depth bands separately from the standing height axis, and keep any wider base footprint spans available for cross-view matching instead of collapsing them into the plate width.",
         ),
         (
             "constraints",
             "{\n  \"global_constraints\": [],\n  \"modeling_sequence\": [],\n  \"uncertainties\": []\n}",
-            "Extract only global constraints, modeling sequence, and uncertainties. Include explicit constraints that map top-view contour_stack items to section-view axial_bands, state separately whether each mapped region is kept material or removed material, call out any case where a top-view contour is visible through an upper opening but belongs to a lower internal face, and preserve any explicit R-radius transition as a real fillet requirement rather than allowing it to collapse into a step.",
+            "Extract only global constraints, modeling sequence, and uncertainties. Include explicit constraints that map top-view contour_stack items to section-view axial_bands, state separately whether each mapped region is kept material or removed material, call out any case where a contour is visible through another opening but belongs to a deeper face, and preserve any explicit R-radius transition as a real fillet requirement rather than allowing it to collapse into a step. Prefer relation constraints such as concentricity, symmetry, tangency, equal spacing, alignment, containment, and ordering when they are visually evident even if some dimensions are missing.",
         ),
     ]
     scope_results = {}
@@ -336,24 +671,58 @@ def run_analysis_stage(workspace_dir: str) -> Path:
             scope_instructions=scope_instructions,
             model_type=metadata["model_type"],
         )
-        result = chain.invoke(image_data)["result"]
+        result = _invoke_analysis_json_chain_with_retries(
+            chain,
+            image_data,
+            description=f"Scoped analysis for '{scope_name}'",
+        )
         if not result:
-            raise ValueError(f"Drawing analysis failed for scope '{scope_name}': model response did not contain valid JSON.")
+            logger.warning(
+                "Scoped analysis for '{}' returned no valid JSON. Falling back to broader analysis for missing data.",
+                scope_name,
+            )
+            continue
         scope_results[scope_name] = result
 
+    summary_scope = scope_results.get("summary", {})
+    constraints_scope = scope_results.get("constraints", {})
+
     result = {
-        "drawing_summary": scope_results["summary"].get("drawing_summary", {}),
-        "section_interpretation": scope_results["summary"].get("section_interpretation", {}),
-        "views": [scope_results["top_view"], scope_results["section_view"]],
-        "global_constraints": scope_results["constraints"].get("global_constraints", []),
-        "modeling_sequence": scope_results["constraints"].get("modeling_sequence", []),
-        "uncertainties": scope_results["constraints"].get("uncertainties", []),
+        "drawing_summary": summary_scope.get("drawing_summary", {}),
+        "section_interpretation": summary_scope.get("section_interpretation", {}),
+        "views": [
+            scope_results[scope_name]
+            for scope_name in ("top_view", "section_view")
+            if scope_name in scope_results
+        ],
+        "global_constraints": constraints_scope.get("global_constraints", []),
+        "modeling_sequence": constraints_scope.get("modeling_sequence", []),
+        "uncertainties": constraints_scope.get("uncertainties", []),
     }
+
+    result = normalize_analysis_payload(result)
+    if not _has_required_views(result):
+        logger.warning("Scoped analysis did not yield required top/section views. Falling back to full-drawing analysis.")
+        fallback_result = _invoke_analysis_json_chain_with_retries(
+            CadDrawingAnalyzerChain(model_type=metadata["model_type"]),
+            image_data,
+            description="Initial full-drawing analysis fallback",
+        )
+        if fallback_result:
+            result = normalize_analysis_payload(_merge_analysis_with_fallback(result, fallback_result))
 
     analysis_issues = validate_analysis_payload(result)
     editable_result = result
     if analysis_issues:
         editable_result = _repair_analysis_until_aligned(workspace_path, metadata, result)
+        if not _has_required_views(editable_result):
+            fallback_result = _invoke_analysis_json_chain_with_retries(
+                CadDrawingAnalyzerChain(model_type=metadata["model_type"]),
+                image_data,
+                description="Post-repair full-drawing analysis fallback",
+            )
+            if fallback_result:
+                editable_result = normalize_analysis_payload(_merge_analysis_with_fallback(editable_result, fallback_result))
         analysis_issues = validate_analysis_payload(editable_result)
 
     generated_path = _analysis_file(workspace_path, generated=True)
@@ -362,8 +731,12 @@ def run_analysis_stage(workspace_dir: str) -> Path:
     _write_review_analysis_payload(workspace_path, editable_result)
     _analysis_report_file(workspace_path).write_text(format_analysis_report(editable_result), encoding="utf-8")
 
-    if analysis_issues:
+    if _blocking_analysis_issues(analysis_issues):
         logger.warning("Analysis JSON has alignment issues; see report at {}", _analysis_report_file(workspace_path))
+        raise ValueError(
+            "Analysis JSON still failed alignment checks after automatic repair. See report: "
+            f"{_analysis_report_file(workspace_path)}"
+        )
 
     logger.info(f"Saved agent-managed analysis JSON to {generated_path}")
     logger.info(f"Review copy of analysis JSON is available at {review_path}")
@@ -380,22 +753,63 @@ def _repair_code_until_aligned(
     code = initial_code
     issues = validate_generated_code(code, analysis_payload)
     attempt = 0
+    analysis_documents = _analysis_documents_text(workspace_path)
     while issues and attempt < max_attempts:
         feedback = "Validator mismatches to fix:\n" + "\n".join(f"- {issue}" for issue in issues)
         chain = CadCodeRefinerChain(model_type=metadata["model_type"])
-        repaired = chain.invoke(
-            {
-                "analysis_json": _analysis_documents_text(workspace_path),
-                "code": code,
-                "feedback": feedback,
-            }
-        )["result"]
+        repaired = _invoke_refiner_chain_with_retries(
+            chain=chain,
+            analysis_documents=analysis_documents,
+            code=code,
+            feedback=feedback,
+        )
         if not repaired:
             break
         code = repaired
         issues = validate_generated_code(code, analysis_payload)
         attempt += 1
     return code
+
+
+def _latest_step_comparison_feedback(workspace_path: Path, version: int) -> str:
+    inspection_payload = _load_step_inspection_payload(workspace_path, version)
+    if not inspection_payload:
+        return ""
+    return _format_step_comparison_feedback(inspection_payload)
+
+
+def _execution_failure_guidance(log_content: str, current_code: str = "") -> str:
+    combined_text = f"{log_content}\n{current_code}"
+    guidance: list[str] = []
+
+    if "unexpected keyword argument 'loftCombine'" in combined_text or "loftCombine=" in current_code:
+        guidance.append(
+            "- Do not call loft with loftCombine=... . In this CadQuery environment that keyword is unsupported. Use loft(ruled=True), loft(combine=True, ruled=True), or rebuild the transition with a simpler solid construction that executes on the current API."
+        )
+
+    if "Workplane object must have at least one solid on the stack to union!" in combined_text:
+        guidance.append(
+            "- Repair union ownership before changing dimensions. Every operand passed to union() must already contain a real solid on its stack. If an intersect(), loft(), or add() path may leave an empty workplane, re-wrap the actual solid first or fuse wrapped solids explicitly before continuing."
+        )
+
+    if "Cannot find a solid on the stack or in the parent chain" in combined_text:
+        guidance.append(
+            "- Repair the boolean target/cutter sequence before redesigning geometry. The object receiving cut()/intersect()/union() must already own a solid, and the cutter must also resolve to a solid. Do not switch onto a fresh construction workplane and then apply a boolean as if it were still attached to the previous solid."
+        )
+
+    if "Expected 1 solid, got" in combined_text:
+        guidance.append(
+            "- The next candidate must end with exactly one fused solid. Eliminate detached helper bodies, partial loft fragments, and multi-body leftovers before export."
+        )
+
+    if not guidance:
+        return ""
+
+    return "\n".join([
+        "## Structured execution repair guidance",
+        *guidance,
+        "- Keep the existing dimensions and coordinate frame unless the failure proves they are wrong. Fix the invalid CadQuery operation sequence first.",
+    ])
 
 
 def run_generation_stage(workspace_dir: str) -> Path:
@@ -408,14 +822,14 @@ def run_generation_stage(workspace_dir: str) -> Path:
     analysis_documents = _analysis_documents_text(workspace_path)
     analysis_payload = _load_agent_analysis_payload(workspace_path)
     analysis_issues = validate_analysis_payload(analysis_payload)
-    if analysis_issues:
+    if _blocking_analysis_issues(analysis_issues):
         analysis_payload = _repair_analysis_until_aligned(workspace_path, metadata, analysis_payload)
         analysis_issues = validate_analysis_payload(analysis_payload)
         _write_agent_analysis_payload(workspace_path, analysis_payload)
         _write_review_analysis_payload(workspace_path, analysis_payload)
         analysis_documents = _analysis_documents_text(workspace_path)
     _analysis_report_file(workspace_path).write_text(format_analysis_report(analysis_payload), encoding="utf-8")
-    if analysis_issues:
+    if _blocking_analysis_issues(analysis_issues):
         raise ValueError(
             "Analysis JSON still failed alignment checks after automatic repair. See report: "
             f"{_analysis_report_file(workspace_path)}"
@@ -439,7 +853,7 @@ def run_generation_stage(workspace_dir: str) -> Path:
     return review_path
 
 
-def run_execution_stage(workspace_dir: str, max_auto_repairs: int = 2) -> Path:
+def run_execution_stage(workspace_dir: str, max_auto_repairs: int = 4, max_refinement_cycles: int = 2) -> Path:
     workspace_path = Path(workspace_dir).expanduser().resolve()
     version = _latest_model_version(workspace_path)
     if version is None:
@@ -447,12 +861,13 @@ def run_execution_stage(workspace_dir: str, max_auto_repairs: int = 2) -> Path:
     metadata = _load_metadata(workspace_path)
     analysis_payload = _load_agent_analysis_payload(workspace_path)
     analysis_issues = validate_analysis_payload(analysis_payload)
-    if analysis_issues:
+    if _blocking_analysis_issues(analysis_issues):
         analysis_payload = _repair_analysis_until_aligned(workspace_path, metadata, analysis_payload)
         _write_agent_analysis_payload(workspace_path, analysis_payload)
         _write_review_analysis_payload(workspace_path, analysis_payload)
 
     attempt = 0
+    refinement_cycle = 0
     while True:
         code_path = _agent_model_file(workspace_path, version)
         output_step = _output_step_file(workspace_path, version)
@@ -479,12 +894,76 @@ def run_execution_stage(workspace_dir: str, max_auto_repairs: int = 2) -> Path:
             if final_output != output_step:
                 shutil.copy2(output_step, final_output)
 
+            inspection_path = _run_step_inspection(workspace_path, version, output_step, metadata)
+            inspection_payload = _read_json(inspection_path)
+            comparison_feedback = _format_step_comparison_feedback(inspection_payload)
+            if comparison_feedback:
+                if attempt >= max_auto_repairs:
+                    if refinement_cycle >= max_refinement_cycles:
+                        raise RuntimeError(
+                            "STEP execution succeeded but the result still differs from the reference STEP after automatic repair attempts. "
+                            f"See inspection report: {inspection_path}"
+                        )
+
+                    logger.warning(
+                        "Execution comparison still fails after {} inline repair attempts; rolling back to refine-code (cycle {}/{}).",
+                        attempt,
+                        refinement_cycle + 1,
+                        max_refinement_cycles,
+                    )
+                    run_refinement_stage(str(workspace_path))
+                    version = _latest_model_version(workspace_path)
+                    if version is None:
+                        raise RuntimeError("Refinement rollback did not produce a new model version.")
+                    attempt = 0
+                    refinement_cycle += 1
+                    continue
+
+                current_code = code_path.read_text(encoding="utf-8")
+                feedback_sections = []
+                if _feedback_file(workspace_path).exists():
+                    existing_feedback = _feedback_file(workspace_path).read_text(encoding="utf-8").strip()
+                    if existing_feedback:
+                        feedback_sections.append(existing_feedback)
+                code_report_path = _code_report_file(workspace_path, version)
+                if code_report_path.exists():
+                    feedback_sections.append("## Latest validator report\n" + code_report_path.read_text(encoding="utf-8").strip())
+                feedback_sections.append(comparison_feedback)
+
+                refined_code = _refine_code_from_feedback(
+                    workspace_path=workspace_path,
+                    metadata=metadata,
+                    analysis_payload=analysis_payload,
+                    current_code=current_code,
+                    feedback="\n\n".join(section for section in feedback_sections if section.strip()),
+                )
+
+                version = _next_model_version(workspace_path)
+                _persist_code_version(workspace_path, version, refined_code, analysis_payload)
+                attempt += 1
+                continue
+
             logger.info(f"Execution succeeded. STEP file saved to {output_step}")
             logger.info(f"Execution log saved to {log_path}")
             return output_step
 
         if attempt >= max_auto_repairs:
-            raise RuntimeError(f"Code execution failed after automatic repair attempts. See log: {log_path}")
+            if refinement_cycle >= max_refinement_cycles:
+                raise RuntimeError(f"Code execution failed after automatic repair attempts. See log: {log_path}")
+
+            logger.warning(
+                "Code execution still fails after {} inline repair attempts; rolling back to refine-code (cycle {}/{}).",
+                attempt,
+                refinement_cycle + 1,
+                max_refinement_cycles,
+            )
+            run_refinement_stage(str(workspace_path))
+            version = _latest_model_version(workspace_path)
+            if version is None:
+                raise RuntimeError("Refinement rollback did not produce a new model version.")
+            attempt = 0
+            refinement_cycle += 1
+            continue
 
         current_code = code_path.read_text(encoding="utf-8")
         feedback_sections = []
@@ -493,6 +972,9 @@ def run_execution_stage(workspace_dir: str, max_auto_repairs: int = 2) -> Path:
             if existing_feedback:
                 feedback_sections.append(existing_feedback)
         feedback_sections.append("## Automatic execution failure\n" + log_content.strip())
+        execution_guidance = _execution_failure_guidance(log_content, current_code)
+        if execution_guidance:
+            feedback_sections.append(execution_guidance)
         code_report_path = _code_report_file(workspace_path, version)
         if code_report_path.exists():
             feedback_sections.append("## Latest validator report\n" + code_report_path.read_text(encoding="utf-8").strip())
@@ -520,14 +1002,14 @@ def run_refinement_stage(workspace_dir: str) -> Path:
     analysis_documents = _analysis_documents_text(workspace_path)
     analysis_payload = _load_agent_analysis_payload(workspace_path)
     analysis_issues = validate_analysis_payload(analysis_payload)
-    if analysis_issues:
+    if _blocking_analysis_issues(analysis_issues):
         analysis_payload = _repair_analysis_until_aligned(workspace_path, metadata, analysis_payload)
         analysis_issues = validate_analysis_payload(analysis_payload)
         _write_agent_analysis_payload(workspace_path, analysis_payload)
         _write_review_analysis_payload(workspace_path, analysis_payload)
         analysis_documents = _analysis_documents_text(workspace_path)
     _analysis_report_file(workspace_path).write_text(format_analysis_report(analysis_payload), encoding="utf-8")
-    if analysis_issues:
+    if _blocking_analysis_issues(analysis_issues):
         raise ValueError(
             "Analysis JSON still failed alignment checks after automatic repair. See report: "
             f"{_analysis_report_file(workspace_path)}"
@@ -536,7 +1018,14 @@ def run_refinement_stage(workspace_dir: str) -> Path:
     feedback = _feedback_file(workspace_path).read_text(encoding="utf-8") if _feedback_file(workspace_path).exists() else ""
     execution_log = _execution_log_file(workspace_path, version)
     if execution_log.exists():
-        feedback = f"{feedback.strip()}\n\n## Latest execution log\n{execution_log.read_text(encoding='utf-8').strip()}".strip()
+        execution_log_text = execution_log.read_text(encoding="utf-8").strip()
+        feedback = f"{feedback.strip()}\n\n## Latest execution log\n{execution_log_text}".strip()
+        execution_guidance = _execution_failure_guidance(execution_log_text, current_code)
+        if execution_guidance:
+            feedback = f"{feedback.strip()}\n\n{execution_guidance}".strip()
+    comparison_feedback = _latest_step_comparison_feedback(workspace_path, version)
+    if comparison_feedback:
+        feedback = f"{feedback.strip()}\n\n{comparison_feedback}".strip()
 
     result = _refine_code_from_feedback(
         workspace_path=workspace_path,
